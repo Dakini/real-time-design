@@ -325,7 +325,7 @@ export function CanvasStage(props: Props) {
       role="application"
       aria-label="Interview canvas"
       className={cn(
-        "relative flex-1 dotgrid overflow-hidden touch-none",
+        "relative h-full w-full flex-1 dotgrid overflow-hidden touch-none",
         tool === "pan" && "cursor-grab",
         (tool === "pen" || tool === "highlighter") && "cursor-crosshair",
         tool === "eraser" && "cursor-cell",
