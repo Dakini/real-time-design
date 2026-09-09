@@ -1,18 +1,14 @@
-"""In-memory data store: plain dicts guarded by a lock, no persistence.
-
-This is intentionally the single place mutable state lives. Routers never
-touch these dicts directly — they go through `app.service`.
-"""
+"""Deterministic demo data, seeded into an empty database."""
 
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy.orm import Session
+
+from .clock import now_ms
+from .db_models import CanvasElementRow, GuestLinkRow, ParticipantRow, SessionRow, UserRow
 from .models import (
-    CanvasElement,
-    CanvasOperationEnvelope,
     ConnectorElement,
     GuestLink,
     GuestRole,
@@ -22,95 +18,25 @@ from .models import (
     Role,
     SessionState,
     StickyElement,
-    User,
 )
 from .security import hash_password
 
-PARTICIPANT_COLORS = ["amberdeep", "warm", "remote", "live"]
 
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
-
-
-def now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
-
-
-@dataclass
-class UserRecord:
-    id: str
-    email: str
-    displayName: str
-    createdAt: str
-    password_hash: str
-
-    def to_model(self) -> User:
-        return User(id=self.id, email=self.email, displayName=self.displayName, createdAt=self.createdAt)
-
-
-class Store:
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-
-        self.users: dict[str, UserRecord] = {}
-        self.users_by_email: dict[str, str] = {}
-
-        # interviewerSession cookie: sha256(token) -> userId
-        self.interviewer_session_tokens: dict[str, str] = {}
-
-        self.sessions: dict[str, InterviewSession] = {}
-
-        self.links: dict[str, GuestLink] = {}
-        self.links_by_token: dict[str, str] = {}
-
-        self.participants: dict[str, Participant] = {}
-        # participantToken bearer credential: sha256(token) -> participantId
-        self.participant_token_hashes: dict[str, str] = {}
-
-        self.elements: dict[str, list[CanvasElement]] = {}
-        self.operations: dict[str, list[CanvasOperationEnvelope]] = {}
-        self.cursors: dict[str, int] = {}
-
-    def next_color(self, session_id: str) -> str:
-        used = sum(1 for p in self.participants.values() if p.sessionId == session_id)
-        return PARTICIPANT_COLORS[used % len(PARTICIPANT_COLORS)]
-
-    def reset(self) -> None:
-        """Test helper: wipe and reseed deterministic demo data."""
-        self.users.clear()
-        self.users_by_email.clear()
-        self.interviewer_session_tokens.clear()
-        self.sessions.clear()
-        self.links.clear()
-        self.links_by_token.clear()
-        self.participants.clear()
-        self.participant_token_hashes.clear()
-        self.elements.clear()
-        self.operations.clear()
-        self.cursors.clear()
-        seed_demo_data(self)
-
-
-store = Store()
-
-
-def seed_demo_data(db: Store) -> None:
+def seed_demo_data(db: Session) -> None:
     now = datetime.now(timezone.utc)
 
     def iso(offset_minutes: float) -> str:
         t = now + timedelta(minutes=offset_minutes)
         return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
 
-    owner = UserRecord(
+    owner = UserRow(
         id="user_owner",
         email="jordan@linewarmer.io",
         displayName="Jordan Reyes",
         createdAt=iso(0),
         password_hash=hash_password("linewarmer-demo"),
     )
-    db.users[owner.id] = owner
-    db.users_by_email[owner.email] = owner.id
+    db.add(owner)
 
     sessions = [
         InterviewSession(
@@ -160,7 +86,7 @@ def seed_demo_data(db: Store) -> None:
         ),
     ]
     for s in sessions:
-        db.sessions[s.id] = s
+        db.add(SessionRow(**s.model_dump(mode="json"), cursor=0))
 
     link = GuestLink(
         id="lnk_seed",
@@ -173,8 +99,7 @@ def seed_demo_data(db: Store) -> None:
         revokedAt=None,
         createdAt=iso(-40),
     )
-    db.links[link.id] = link
-    db.links_by_token[link.token] = link.id
+    db.add(GuestLinkRow(**link.model_dump(mode="json")))
 
     owner_participant = Participant(
         id="pt_owner",
@@ -186,10 +111,10 @@ def seed_demo_data(db: Store) -> None:
         joinedAt=iso(-28),
         leftAt=None,
     )
-    db.participants[owner_participant.id] = owner_participant
+    db.add(ParticipantRow(**owner_participant.model_dump(mode="json")))
 
     ms = now_ms()
-    ratelimiter_elements: list[CanvasElement] = [
+    ratelimiter_elements = [
         NodeElement(id="el_client", componentType="browser-client", label="Web Client", description="mobile / browser", x=120, y=220, width=160, height=60, createdBy="pt_owner", updatedAt=ms),
         NodeElement(id="el_gateway", componentType="api-gateway", label="API Gateway", description="authn · throttling", x=380, y=170, width=176, height=60, createdBy="pt_owner", updatedAt=ms),
         NodeElement(id="el_cache", componentType="cache", label="Redis Cache", description="token bucket", x=660, y=220, width=160, height=60, createdBy="pt_owner", updatedAt=ms),
@@ -199,24 +124,16 @@ def seed_demo_data(db: Store) -> None:
         ConnectorElement(id="el_c2", fromId="el_gateway", toId="el_cache", label="read", style="curved", dashed=False, arrowEnd=True, createdBy="pt_owner", updatedAt=ms),
         ConnectorElement(id="el_c3", fromId="el_gateway", toId="el_db", label="persist", style="curved", dashed=True, arrowEnd=True, createdBy="pt_owner", updatedAt=ms),
     ]
-
-    chatscale_elements: list[CanvasElement] = [
+    chatscale_elements = [
         NodeElement(id="el_ws", componentType="server", label="WebSocket Fleet", description="sticky sessions", x=220, y=180, width=176, height=60, createdBy="pt_owner", updatedAt=ms),
         NodeElement(id="el_fanout", componentType="pubsub", label="Fan-out broker", description="per-room topics", x=520, y=260, width=176, height=60, createdBy="pt_owner", updatedAt=ms),
         ConnectorElement(id="el_ws_c", fromId="el_ws", toId="el_fanout", label="events", style="curved", dashed=False, arrowEnd=True, createdBy="pt_owner", updatedAt=ms),
     ]
 
-    db.elements["ses_ratelimiter"] = ratelimiter_elements
-    db.elements["ses_chatscale"] = chatscale_elements
-    db.elements["ses_cdn"] = []
-
-    db.operations["ses_ratelimiter"] = []
-    db.operations["ses_chatscale"] = []
-    db.operations["ses_cdn"] = []
-
-    db.cursors["ses_ratelimiter"] = 0
-    db.cursors["ses_chatscale"] = 0
-    db.cursors["ses_cdn"] = 0
-
-
-seed_demo_data(store)
+    for session_id, elements in (
+        ("ses_ratelimiter", ratelimiter_elements),
+        ("ses_chatscale", chatscale_elements),
+        ("ses_cdn", []),
+    ):
+        for el in elements:
+            db.add(CanvasElementRow(sessionId=session_id, id=el.id, data=el.model_dump(mode="json")))

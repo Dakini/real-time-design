@@ -1,4 +1,21 @@
-from app.store import store
+from app.database import SessionLocal
+from app.db_models import GuestLinkRow, SessionRow
+
+
+def _set_link(link_id: str, **fields):
+    with SessionLocal() as db:
+        link = db.get(GuestLinkRow, link_id)
+        for key, value in fields.items():
+            setattr(link, key, value)
+        db.commit()
+
+
+def _set_session(session_id: str, **fields):
+    with SessionLocal() as db:
+        session = db.get(SessionRow, session_id)
+        for key, value in fields.items():
+            setattr(session, key, value)
+        db.commit()
 
 
 def test_join_with_unknown_token(client):
@@ -8,28 +25,28 @@ def test_join_with_unknown_token(client):
 
 
 def test_join_with_revoked_token(client):
-    store.links["lnk_seed"].revokedAt = "2020-01-01T00:00:00.000Z"
+    _set_link("lnk_seed", revokedAt="2020-01-01T00:00:00.000Z")
     r = client.post("/api/v1/join", json={"token": "demo-candidate-token", "displayName": "Sam"})
     assert r.status_code == 403
     assert r.json()["code"] == "link_revoked"
 
 
 def test_join_with_expired_token(client):
-    store.links["lnk_seed"].expiresAt = "2020-01-01T00:00:00.000Z"
+    _set_link("lnk_seed", expiresAt="2020-01-01T00:00:00.000Z")
     r = client.post("/api/v1/join", json={"token": "demo-candidate-token", "displayName": "Sam"})
     assert r.status_code == 403
     assert r.json()["code"] == "link_expired"
 
 
 def test_join_archived_session(client):
-    store.sessions["ses_ratelimiter"].state = "archived"
+    _set_session("ses_ratelimiter", state="archived")
     r = client.post("/api/v1/join", json={"token": "demo-candidate-token", "displayName": "Sam"})
     assert r.status_code == 403
     assert r.json()["code"] == "session_archived"
 
 
 def test_join_ended_session(client):
-    store.sessions["ses_ratelimiter"].state = "ended"
+    _set_session("ses_ratelimiter", state="ended")
     r = client.post("/api/v1/join", json={"token": "demo-candidate-token", "displayName": "Sam"})
     assert r.status_code == 403
     assert r.json()["code"] == "session_ended"
@@ -38,7 +55,7 @@ def test_join_ended_session(client):
 def test_join_at_capacity(client):
     # capacity counts *all* active participants of the session, and the seed data
     # already has the owner present, so maxUses=2 allows exactly one more guest.
-    store.links["lnk_seed"].maxUses = 2
+    _set_link("lnk_seed", maxUses=2)
     r1 = client.post("/api/v1/join", json={"token": "demo-candidate-token", "displayName": "Sam Okafor"})
     assert r1.status_code == 200
 

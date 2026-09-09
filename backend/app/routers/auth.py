@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, Depends, Response, status
+from sqlalchemy.orm import Session
 
 from .. import service
+from ..database import get_db
+from ..db_models import UserRow
 from ..deps import SESSION_COOKIE, get_optional_user, get_session_cookie
 from ..models import SignInRequest, User
-from ..store import UserRecord, store
 
 router = APIRouter(tags=["auth"])
 
@@ -28,18 +30,20 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.get("/auth/me", response_model=User | None)
-def get_current_user(user: UserRecord | None = Depends(get_optional_user)) -> User | None:
+def get_current_user(user: UserRow | None = Depends(get_optional_user)) -> User | None:
     return service.get_current_user_model(user)
 
 
 @router.post("/auth/sign-in", response_model=User)
-def sign_in(body: SignInRequest, response: Response) -> User:
-    user, token = service.sign_in(store, body.email, body.password)
+def sign_in(body: SignInRequest, response: Response, db: Session = Depends(get_db)) -> User:
+    user, token = service.sign_in(db, body.email, body.password)
     _set_session_cookie(response, token)
     return user
 
 
 @router.post("/auth/sign-out", status_code=status.HTTP_204_NO_CONTENT)
-def sign_out(response: Response, token: str | None = Depends(get_session_cookie)) -> None:
-    service.sign_out(store, token)
+def sign_out(
+    response: Response, token: str | None = Depends(get_session_cookie), db: Session = Depends(get_db)
+) -> None:
+    service.sign_out(db, token)
     response.delete_cookie(SESSION_COOKIE, path="/")

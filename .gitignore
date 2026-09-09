@@ -95,6 +95,10 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Local dev SQLite database (backend/app/database.py's DATABASE_URL default)
+backend/*.db
+backend/*.db-journal
+
 # Flask stuff:
 instance/
 .webassets-cache

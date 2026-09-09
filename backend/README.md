@@ -1,9 +1,10 @@
 # Linewarmer backend
 
 FastAPI implementation of `../openapi.yaml` — the contract
-`frontend/src/services/api.ts` expects. In-memory store only, seeded with the
-same demo data as the frontend mock (`frontend/src/services/mock/store.ts`),
-so the app has something to show without a database.
+`frontend/src/services/api.ts` expects. Persisted via SQLAlchemy, seeded on
+first run with the same demo data as the frontend mock
+(`frontend/src/services/mock/store.ts`), so the app has something to show
+without any setup.
 
 ## Run
 
@@ -16,6 +17,19 @@ Or from the repo root: `make backend` (or `make dev` to run backend + frontend t
 
 API is mounted at `/api/v1`, matching the `servers` entry in the spec. Docs
 at `/docs`.
+
+## Database
+
+`DATABASE_URL` selects the backend via any SQLAlchemy-supported URL; it
+defaults to a local SQLite file (`backend/linewarmer.db`), created and seeded
+automatically on first startup. The app is database-agnostic — nothing
+outside `app/database.py` assumes SQLite — so pointing it at Postgres is just:
+
+```bash
+DATABASE_URL="postgresql+psycopg://user:pass@host:5432/linewarmer" uv run uvicorn app.main:app --port 8091
+```
+
+(after adding the relevant driver, e.g. `psycopg`, to `pyproject.toml`).
 
 ## Test
 
@@ -44,9 +58,12 @@ uv run pytest
 
 ```
 app/
-  main.py       FastAPI app, CORS, error handlers, router registration
-  models.py     Pydantic schemas mirroring openapi.yaml components
-  store.py      In-memory state + seed data
+  main.py       FastAPI app, CORS, error handlers, router registration, DB init
+  models.py     Pydantic schemas mirroring openapi.yaml components (the API shape)
+  db_models.py  SQLAlchemy ORM models (the storage shape)
+  database.py   Engine/session setup, DATABASE_URL handling
+  seed.py       Demo data, inserted into an empty database on first run
+  clock.py      Timestamp helpers (now_iso, now_ms)
   service.py    Business logic (mirrors mockApi.ts behaviour exactly)
   deps.py       Auth dependencies (cookie session, bearer participant token)
   security.py   Password hashing, token hashing

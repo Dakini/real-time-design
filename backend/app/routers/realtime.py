@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError, TypeAdapter
+from sqlalchemy.orm import Session
 
 from .. import service
+from ..database import get_db
+from ..db_models import InterviewerSessionTokenRow, ParticipantRow, ParticipantTokenHashRow, SessionRow
 from ..deps import SESSION_COOKIE
 from ..models import (
     ClientMessage,
     DocumentUpdateMessage,
+    InterviewSession,
+    Participant,
     PresenceState,
     PresenceUpdateMessage,
     RoomErrorMessage,
@@ -15,49 +20,54 @@ from ..models import (
 )
 from ..realtime import RoomConnection, manager
 from ..security import hash_token
-from ..store import store
 
 router = APIRouter(tags=["realtime"])
 
 _client_message_adapter: TypeAdapter[ClientMessage] = TypeAdapter(ClientMessage)
 
 
-def _authorize(websocket: WebSocket, session_id: str, participant_id: str, token: str | None) -> bool:
-    participant = store.participants.get(participant_id)
+def _authorize(db: Session, websocket: WebSocket, session_id: str, participant_id: str, token: str | None) -> bool:
+    participant = db.get(ParticipantRow, participant_id)
     if participant is None or participant.sessionId != session_id or participant.leftAt is not None:
         return False
 
     # Browsers cannot set an Authorization header on a WebSocket handshake, so the
     # participant bearer token is also accepted as a `token` query param.
     if token:
-        pid = store.participant_token_hashes.get(hash_token(token))
-        if pid == participant.id:
+        token_row = db.get(ParticipantTokenHashRow, hash_token(token))
+        if token_row is not None and token_row.participantId == participant.id:
             return True
 
     auth_header = websocket.headers.get("authorization")
     if auth_header and auth_header.lower().startswith("bearer "):
         header_token = auth_header[7:].strip()
-        pid = store.participant_token_hashes.get(hash_token(header_token))
-        return pid == participant.id
+        token_row = db.get(ParticipantTokenHashRow, hash_token(header_token))
+        return token_row is not None and token_row.participantId == participant.id
 
     cookie_token = websocket.cookies.get(SESSION_COOKIE)
     if cookie_token:
-        user_id = store.interviewer_session_tokens.get(hash_token(cookie_token))
-        return user_id is not None and participant.userId == user_id
+        token_row = db.get(InterviewerSessionTokenRow, hash_token(cookie_token))
+        return token_row is not None and participant.userId == token_row.userId
 
     return False
 
 
 @router.websocket("/sessions/{sessionId}/room")
-async def connect_room(websocket: WebSocket, sessionId: str, participantId: str, token: str | None = None) -> None:
+async def connect_room(
+    websocket: WebSocket,
+    sessionId: str,
+    participantId: str,
+    token: str | None = None,
+    db: Session = Depends(get_db),
+) -> None:
     await websocket.accept()
 
-    session = store.sessions.get(sessionId)
-    if session is None:
+    session_row = db.get(SessionRow, sessionId)
+    if session_row is None:
         await websocket.close(code=4404, reason="Session not found")
         return
 
-    if not _authorize(websocket, sessionId, participantId, token):
+    if not _authorize(db, websocket, sessionId, participantId, token):
         await manager.send(
             websocket,
             RoomErrorMessage(code="forbidden", message="You are not a participant of this session."),
@@ -65,7 +75,8 @@ async def connect_room(websocket: WebSocket, sessionId: str, participantId: str,
         await websocket.close(code=4403, reason="Forbidden")
         return
 
-    participant = store.participants[participantId]
+    participant_row = db.get(ParticipantRow, participantId)
+    participant = Participant.model_validate(participant_row, from_attributes=True)
     presence = PresenceState(
         participantId=participant.id,
         displayName=participant.displayName,
@@ -80,7 +91,7 @@ async def connect_room(websocket: WebSocket, sessionId: str, participantId: str,
 
     await manager.send(
         websocket,
-        RoomJoinedMessage(snapshot=service.snapshot(store, sessionId), presence=manager.presence_list(sessionId)),
+        RoomJoinedMessage(snapshot=service.snapshot(db, sessionId), presence=manager.presence_list(sessionId)),
     )
     await manager.broadcast(sessionId, PresenceUpdateMessage(presence=manager.presence_list(sessionId)))
 
@@ -93,9 +104,10 @@ async def connect_room(websocket: WebSocket, sessionId: str, participantId: str,
                 continue
 
             if message.type == "ops":
-                current_session = store.sessions.get(sessionId)
-                if current_session is None:
+                current_session_row = db.get(SessionRow, sessionId)
+                if current_session_row is None:
                     continue
+                current_session = InterviewSession.model_validate(current_session_row, from_attributes=True)
                 if not service.can_write(current_session, participant):
                     await manager.send(
                         websocket,
@@ -104,13 +116,13 @@ async def connect_room(websocket: WebSocket, sessionId: str, participantId: str,
                     await manager.send(
                         websocket,
                         RoomJoinedMessage(
-                            snapshot=service.snapshot(store, sessionId),
+                            snapshot=service.snapshot(db, sessionId),
                             presence=manager.presence_list(sessionId),
                         ),
                     )
                     continue
                 items = [(item.clientOperationId, item.op) for item in message.ops]
-                envelopes = service.commit_ops(store, sessionId, participant.id, items)
+                envelopes = service.commit_ops(db, sessionId, participant.id, items)
                 await manager.broadcast(sessionId, DocumentUpdateMessage(ops=envelopes))
 
             elif message.type == "presence":

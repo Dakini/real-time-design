@@ -1,19 +1,36 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .database import SessionLocal, init_db
+from .db_models import UserRow
 from .errors import AppError
 from .routers import auth, canvas, guest_links, participants, realtime, sessions
+from .seed import seed_demo_data
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    init_db()
+    with SessionLocal() as db:
+        if db.query(UserRow).first() is None:
+            seed_demo_data(db)
+            db.commit()
+    yield
+
 
 app = FastAPI(
     title="Linewarmer Interview API",
     version="1.0.0",
     summary="The backend contract expected by the Linewarmer frontend.",
+    lifespan=_lifespan,
 )
 
 _default_origins = (

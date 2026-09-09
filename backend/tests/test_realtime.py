@@ -1,4 +1,5 @@
-from app.store import store
+from app.database import SessionLocal
+from app.db_models import SessionRow
 
 
 def test_connect_rejects_unknown_participant(owner_client):
@@ -86,7 +87,9 @@ def test_candidate_write_rejected_when_editing_disabled(client):
     pid = join["participant"]["id"]
     token = join["participantToken"]
 
-    store.sessions["ses_ratelimiter"].candidateEditingEnabled = False
+    with SessionLocal() as db:
+        db.get(SessionRow, "ses_ratelimiter").candidateEditingEnabled = False
+        db.commit()
 
     url = f"/api/v1/sessions/ses_ratelimiter/room?participantId={pid}"
     with client.websocket_connect(url, headers={"Authorization": f"Bearer {token}"}) as ws:

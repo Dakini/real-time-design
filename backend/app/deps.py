@@ -2,36 +2,34 @@
 
 from __future__ import annotations
 
-from fastapi import Request
+from fastapi import Depends, Request
+from sqlalchemy.orm import Session
 
+from .database import get_db
+from .db_models import InterviewerSessionTokenRow, ParticipantRow, ParticipantTokenHashRow, SessionRow, UserRow
 from .errors import forbidden, session_not_found, unauthorized
-from .security import hash_token
-from .store import Store, UserRecord, store
 from .models import Participant
+from .security import hash_token
 
 SESSION_COOKIE = "lw_session"
-
-
-def get_store() -> Store:
-    return store
 
 
 def get_session_cookie(request: Request) -> str | None:
     return request.cookies.get(SESSION_COOKIE)
 
 
-def get_optional_user(request: Request) -> UserRecord | None:
+def get_optional_user(request: Request, db: Session = Depends(get_db)) -> UserRow | None:
     token = get_session_cookie(request)
     if not token:
         return None
-    user_id = store.interviewer_session_tokens.get(hash_token(token))
-    if user_id is None:
+    token_row = db.get(InterviewerSessionTokenRow, hash_token(token))
+    if token_row is None:
         return None
-    return store.users.get(user_id)
+    return db.get(UserRow, token_row.userId)
 
 
-def require_user(request: Request) -> UserRecord:
-    user = get_optional_user(request)
+def require_user(request: Request, db: Session = Depends(get_db)) -> UserRow:
+    user = get_optional_user(request, db)
     if user is None:
         raise unauthorized()
     return user
@@ -44,37 +42,45 @@ def get_bearer_token(request: Request) -> str | None:
     return header[7:].strip()
 
 
-def get_optional_participant(request: Request) -> Participant | None:
+def get_optional_participant(request: Request, db: Session = Depends(get_db)) -> Participant | None:
     token = get_bearer_token(request)
     if not token:
         return None
-    participant_id = store.participant_token_hashes.get(hash_token(token))
-    if participant_id is None:
+    token_row = db.get(ParticipantTokenHashRow, hash_token(token))
+    if token_row is None:
         return None
-    participant = store.participants.get(participant_id)
-    if participant is None or participant.leftAt is not None:
+    row = db.get(ParticipantRow, token_row.participantId)
+    if row is None or row.leftAt is not None:
         return None
-    return participant
+    return Participant.model_validate(row, from_attributes=True)
 
 
-def require_room_access(session_id: str, request: Request) -> tuple[UserRecord | None, Participant | None]:
+def require_room_access(
+    session_id: str, request: Request, db: Session
+) -> tuple[UserRow | None, Participant | None]:
     """Owner/interviewer via cookie, or any active participant via bearer token."""
-    session = store.sessions.get(session_id)
-    if session is None:
+    session_row = db.get(SessionRow, session_id)
+    if session_row is None:
         raise session_not_found()
 
-    user = get_optional_user(request)
+    user = get_optional_user(request, db)
     if user is not None:
-        if session.ownerUserId == user.id:
+        if session_row.ownerUserId == user.id:
             return user, None
-        has_active_membership = any(
-            p.sessionId == session_id and p.userId == user.id and p.leftAt is None
-            for p in store.participants.values()
+        has_active_membership = (
+            db.query(ParticipantRow)
+            .filter(
+                ParticipantRow.sessionId == session_id,
+                ParticipantRow.userId == user.id,
+                ParticipantRow.leftAt.is_(None),
+            )
+            .first()
+            is not None
         )
         if has_active_membership:
             return user, None
 
-    participant = get_optional_participant(request)
+    participant = get_optional_participant(request, db)
     if participant is not None and participant.sessionId == session_id:
         return None, participant
 
