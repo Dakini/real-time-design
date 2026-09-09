@@ -1,0 +1,1428 @@
+openapi: 3.1.0
+
+info:
+  title: Linewarmer Interview API
+  version: 1.0.0
+  summary: The backend contract expected by the Linewarmer frontend.
+  description: |
+    This document specifies the backend that `frontend/src/services/api.ts` expects.
+
+    ## How this was derived
+
+    The frontend talks to exactly one boundary: the `InterviewApi` interface in
+    `frontend/src/services/api.ts`. Today that interface is satisfied by an in-memory
+    mock (`frontend/src/services/mock/mockApi.ts`) wired up in
+    `frontend/src/services/index.ts`; there is no HTTP client in the repository yet.
+
+    Every operation below maps 1:1 to a method on `InterviewApi`. The `x-client-method`
+    extension on each operation names the method it backs. Request and response schemas
+    are the TypeScript types in `frontend/src/services/types.ts`, and the documented
+    behaviour (filtering, sort order, state transitions, error text) is the observable
+    behaviour of the mock, which is the de facto specification the UI was written against.
+
+    ## Assumptions, flagged
+
+    Because the frontend currently calls an in-process mock, a few things are not
+    observable from the client code and are specified here as deliberate choices. A
+    backend implementer should treat these as decisions to confirm, not as facts read
+    off the frontend:
+
+    1. **Transport of credentials.** The mock keeps `currentUserId` in a field and
+       identifies guests by an opaque `participantId` held in `sessionStorage`
+       (`frontend/src/features/room/participantStore.ts`). No token is ever sent. This
+       spec introduces two credentials — an interviewer session cookie and a guest
+       participant bearer token — because the mock's `requireOwner` / participant checks
+       have to be enforced from *something* on a real wire. Adopting this requires a
+       small frontend change: persist and send the participant token returned by
+       `POST /join`.
+    2. **The realtime wire format.** `InterviewApi.connect` is a callback API, not a
+       protocol. `ServerMessage` in `types.ts` fixes the server-to-client half exactly;
+       the client-to-server half (`ClientMessage`) is designed here from the `RoomHandle`
+       surface (`sendOps`, `updatePresence`).
+    3. **`clientOperationId` ownership.** The mock generates it server-side, but it
+       dedupes on it (`mockApi.ts`, `applyEnvelope`), which only pays off if the client
+       supplies it. This spec has the client generate it so op submission is idempotent
+       across reconnects.
+
+    ## Response envelope
+
+    There is none. The frontend consumes bare JSON matching its TypeScript types
+    (`return delay(session)`, not `return delay({ data: session })`). Do not wrap.
+
+    ## Errors
+
+    The UI renders `error.message` verbatim to end users — see the join lobby in
+    `frontend/src/routes/join.$token.tsx`, which puts the caught message straight on
+    screen. Error response `message` fields are therefore user-facing copy, not
+    developer diagnostics. The exact strings the mock produces are documented per
+    operation and should be preserved.
+
+  contact:
+    name: Linewarmer frontend
+    url: https://github.com/linewarmer/real-time-design
+
+servers:
+  - url: /api/v1
+    description: Same-origin API, mounted under the app that serves the frontend.
+
+tags:
+  - name: auth
+    description: Interviewer identity. Guests never authenticate here.
+  - name: sessions
+    description: Interview session lifecycle. Owner-only except for reads.
+  - name: guest-links
+    description: Shareable candidate/observer invite links.
+  - name: participants
+    description: Who is in a room, and joining/leaving it.
+  - name: canvas
+    description: The persisted canvas document.
+  - name: realtime
+    description: The WebSocket channel carrying ops and presence.
+
+security:
+  - interviewerSession: []
+
+paths:
+  # ------------------------------------------------------------------ auth --
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentUser
+      x-client-method: InterviewApi.getCurrentUser
+      summary: Get the signed-in interviewer, or null.
+      description: |
+        Returns the user identified by the request credentials, or the JSON literal
+        `null` when there is no valid session. **Must not 401** — the client signature is
+        `Promise<User | null>` and the app uses a null body as "signed out", so an error
+        status would surface as a thrown exception instead.
+
+        Guest participants are not users; this returns `null` for them.
+      security:
+        - interviewerSession: []
+        - {}
+      responses:
+        '200':
+          description: The current user, or null if unauthenticated.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: 'null'
+              examples:
+                signedIn:
+                  value:
+                    id: user_owner
+                    email: jordan@linewarmer.io
+                    displayName: Jordan Reyes
+                    createdAt: '2026-09-09T10:00:00.000Z'
+                signedOut:
+                  value: null
+
+  /auth/sign-in:
+    post:
+      tags: [auth]
+      operationId: signIn
+      x-client-method: InterviewApi.signIn
+      summary: Sign in by email, creating the user on first sight.
+      description: |
+        Upsert semantics, mirroring the mock: if no user exists with this email, create
+        one with `displayName` defaulting to the local part of the address
+        (`email.split("@")[0]`), then sign that user in. The frontend never sends a
+        password and has no sign-up screen, so a magic-link or OTP flow would need an
+        extra round trip the client does not currently make.
+
+        Establishes the `interviewerSession` credential on success.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  examples: ['jordan@linewarmer.io']
+      responses:
+        '200':
+          description: Signed in. Sets the session cookie.
+          headers:
+            Set-Cookie:
+              description: 'Session cookie, e.g. `lw_session=…; HttpOnly; Secure; SameSite=Lax; Path=/`'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/sign-out:
+    post:
+      tags: [auth]
+      operationId: signOut
+      x-client-method: InterviewApi.signOut
+      summary: Clear the current session.
+      description: Idempotent. Returns 204 even when no session was active.
+      responses:
+        '204':
+          description: Signed out. Clears the session cookie.
+          headers:
+            Set-Cookie:
+              description: Expired session cookie.
+              schema: { type: string }
+
+  # -------------------------------------------------------------- sessions --
+
+  /sessions:
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      x-client-method: InterviewApi.listSessions
+      summary: List the current user's interviews.
+      description: |
+        Scoped to sessions the caller owns (`ownerUserId === currentUserId`). Archived
+        sessions are excluded. Sorted by `updatedAt` descending — the dashboard
+        (`frontend/src/routes/index.tsx`) renders the array as received and does no
+        sorting of its own, so ordering is the backend's responsibility.
+
+        Not paginated: the client has no cursor or page parameter.
+      responses:
+        '200':
+          description: The caller's non-archived sessions, newest activity first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/InterviewSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+    post:
+      tags: [sessions]
+      operationId: createSession
+      x-client-method: InterviewApi.createSession
+      summary: Create a draft interview.
+      description: |
+        The created session starts in state `draft` with `candidateEditingEnabled: true`
+        and `cursorsVisible: true`, an empty canvas, and `startedAt` / `endedAt` null.
+        `ownerUserId` is the caller.
+
+        Field normalisation performed by the mock and relied on by the UI: `title` and
+        `prompt` are trimmed, and an empty `title` becomes `"Untitled interview"`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, prompt]
+              properties:
+                title:
+                  type: string
+                  description: Trimmed. Empty after trimming becomes "Untitled interview".
+                  examples: ['Design global rate limiter']
+                prompt:
+                  type: string
+                  description: Trimmed. May be empty.
+                scheduledAt:
+                  type: [string, 'null']
+                  format: date-time
+                  description: Optional. Omitted or null means unscheduled.
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+
+    get:
+      tags: [sessions]
+      operationId: getSession
+      x-client-method: InterviewApi.getSession
+      summary: Fetch one session.
+      description: |
+        Readable by the owner and by **any active participant**, including guests. This
+        is the one session read a candidate makes: `useRoom`
+        (`frontend/src/features/room/useRoom.ts`) calls it on mount to render the room
+        header and prompt, authenticated only by the guest's participant token.
+      security:
+        - interviewerSession: []
+        - participantToken: []
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+    patch:
+      tags: [sessions]
+      operationId: updateSession
+      x-client-method: InterviewApi.updateSession
+      summary: Update session settings.
+      description: |
+        Owner only. A sparse patch — the client sends only changed keys, often exactly
+        one (`{ candidateEditingEnabled: false }` from the room's permission toggles in
+        `frontend/src/routes/room.$sessionId.tsx`). Absent keys must be left untouched.
+        `updatedAt` is refreshed on every successful patch.
+
+        **Side effect:** broadcasts `permission_changed` carrying the updated session to
+        every connected room member. This is how a candidate's canvas becomes read-only
+        without a reload, so it is required, not advisory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionPatch' }
+      responses:
+        '200':
+          description: The updated session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/start:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: startSession
+      x-client-method: InterviewApi.startSession
+      summary: Move a session to live.
+      description: |
+        Owner only. Sets `state: "live"` and stamps `startedAt` **only if not already
+        set**, so restarting a live session does not reset the clock. Idempotent for a
+        session already live.
+
+        **Side effect:** broadcasts `permission_changed`.
+      responses:
+        '200':
+          description: The live session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+        '409':
+          description: The session is ended or archived and cannot be started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /sessions/{sessionId}/end:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: endSession
+      x-client-method: InterviewApi.endSession
+      summary: End a session.
+      description: |
+        Owner only. Sets `state: "ended"`, stamps `endedAt`, and **also forces
+        `candidateEditingEnabled` to `false`** — ending an interview must lock the
+        candidate out in the same atomic write, not leave the flag as it was.
+
+        **Side effect:** broadcasts `session_ended`. After this, the room rejects
+        incoming ops from every role.
+      responses:
+        '200':
+          description: The ended session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/archive:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: archiveSession
+      x-client-method: InterviewApi.archiveSession
+      summary: Archive a session.
+      description: |
+        Owner only. Sets `state: "archived"`, which removes it from `GET /sessions` and
+        makes guest links unusable. The dashboard treats this as delete — there is no
+        unarchive call in the client.
+      responses:
+        '200':
+          description: The archived session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/duplicate:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [sessions]
+      operationId: duplicateSession
+      x-client-method: InterviewApi.duplicateSession
+      summary: Copy a session into a new draft.
+      description: |
+        Owner only. Creates a **new** session owned by the caller with title
+        `"{original title} (copy)"`, the same `prompt`, and a deep copy of the source
+        canvas elements. State resets to `draft`; participants, guest links, operation
+        history and timestamps are **not** copied. The dashboard navigates straight to
+        the returned session's room, so the response must be the copy, not the original.
+      responses:
+        '201':
+          description: The new draft copy.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InterviewSession' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  # ----------------------------------------------------------- guest links --
+
+  /sessions/{sessionId}/guest-links:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+
+    get:
+      tags: [guest-links]
+      operationId: listGuestLinks
+      x-client-method: InterviewApi.listGuestLinks
+      summary: List active invite links.
+      description: |
+        Owner only. Returns **only non-revoked** links (`revokedAt === null`). The client
+        still re-checks `!l.revokedAt` when picking a link to copy, but it relies on this
+        filter to keep dead tokens out of the share sheet.
+      responses:
+        '200':
+          description: Active links for this session.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/GuestLink' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+    post:
+      tags: [guest-links]
+      operationId: createGuestLink
+      x-client-method: InterviewApi.createGuestLink
+      summary: Mint an invite link, rotating any existing one for that role.
+      description: |
+        Owner only. **Rotation, not accumulation:** creating a link revokes every other
+        active link on this session with the same `roleGranted`, then issues a new one.
+        There is at most one live link per role at a time. The room UI presents this as
+        "rotate link", and any previously shared URL must stop working immediately.
+
+        Defaults applied by the server: `roleGranted` defaults to `candidate` when the
+        body is omitted (the client's parameter is optional), `maxUses: 10`,
+        `expiresAt: null`, `uses: 0`.
+
+        `token` must be a cryptographically random value of at least 128 bits. The
+        frontend embeds it in a URL as `/join/{token}`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  $ref: '#/components/schemas/GuestRole'
+                  default: candidate
+      responses:
+        '201':
+          description: The new link. Previous links for this role are now revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GuestLink' }
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/guest-links/{linkId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - name: linkId
+        in: path
+        required: true
+        schema: { type: string, examples: ['lnk_m1a2b3c4d5'] }
+
+    delete:
+      tags: [guest-links]
+      operationId: revokeGuestLink
+      x-client-method: InterviewApi.revokeGuestLink
+      summary: Revoke an invite link.
+      description: |
+        Owner only. Soft revoke — stamps `revokedAt` rather than deleting the row, so
+        already-joined participants keep their access while the token stops working for
+        new joins. The link must belong to `{sessionId}`; a mismatched pair is a 404.
+
+        The room's "revoke all" control loops over active links calling this once each,
+        so it must tolerate being called in quick succession.
+      responses:
+        '204':
+          description: Revoked.
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404':
+          description: No such link on this session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: not_found, message: Link not found }
+
+  # ---------------------------------------------------------- participants --
+
+  /sessions/{sessionId}/participants:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [participants]
+      operationId: listParticipants
+      x-client-method: InterviewApi.listParticipants
+      summary: List active participants.
+      description: |
+        Readable by any active participant of the session, including guests. Returns
+        **only participants who have not left** (`leftAt === null`).
+
+        The room route calls this on mount to decide whether the visitor is already a
+        known participant before falling back to `joinAsOwner`.
+      security:
+        - interviewerSession: []
+        - participantToken: []
+      responses:
+        '200':
+          description: Active participants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Participant' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/participants/me:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [participants]
+      operationId: joinAsOwner
+      x-client-method: InterviewApi.joinAsOwner
+      summary: Join a room as a signed-in interviewer.
+      description: |
+        The authenticated counterpart to `POST /join`. Requires an interviewer session;
+        no guest token is involved.
+
+        **Idempotent** — if the caller already has an active participant row on this
+        session, return it unchanged rather than creating a second one. Re-entering a
+        room must not duplicate the user in the roster.
+
+        Role assignment: `owner` if `session.ownerUserId` is the caller, otherwise
+        `interviewer`. `displayName` is taken from the user record. `color` is assigned
+        round-robin from the participant palette.
+      responses:
+        '200':
+          description: The session and the caller's participant record.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/participants/{participantId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - name: participantId
+        in: path
+        required: true
+        schema: { type: string, examples: ['pt_m1a2b3c4d5'] }
+    delete:
+      tags: [participants]
+      operationId: removeParticipant
+      x-client-method: InterviewApi.removeParticipant
+      summary: Remove someone from the room.
+      description: |
+        Owner only. Soft removal — stamps `leftAt`, drops the participant from presence,
+        and revokes their access: their token must stop working for room reads and the
+        WebSocket immediately.
+
+        **Side effect:** broadcasts `presence_update` with the shortened roster.
+      responses:
+        '204':
+          description: Removed.
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404':
+          description: No such participant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: not_found, message: Participant not found }
+
+  /join:
+    post:
+      tags: [participants]
+      operationId: joinWithToken
+      x-client-method: InterviewApi.joinWithToken
+      summary: Redeem a guest link and join as candidate or observer.
+      description: |
+        **Unauthenticated** — this is how a candidate with a shared URL enters. The token
+        is the only credential, and it is spent here: on success the response establishes
+        the `participantToken` credential used for every subsequent room call.
+
+        Validation, in the order the mock applies it (order matters, because the first
+        failure's message is what the candidate sees):
+
+        | Check | Message |
+        |---|---|
+        | Token unknown | `This link is not valid.` |
+        | `revokedAt` set | `This link has been revoked by the interviewer.` |
+        | `expiresAt` in the past | `This link has expired.` |
+        | Session archived | `This interview is no longer available.` |
+        | Session ended | `This interview has ended.` |
+        | Active participants >= `maxUses` | `This interview is full.` |
+        | `displayName` under 2 chars after trimming | `Please enter your name.` |
+
+        On success: increment the link's `uses`, create a participant with
+        `role = link.roleGranted` and `userId: null`, `displayName` trimmed and truncated
+        to 40 characters, and a palette colour.
+
+        Note the capacity check counts *currently active participants*, not cumulative
+        `uses` — someone who leaves frees a seat.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, displayName]
+              properties:
+                token:
+                  type: string
+                  description: The opaque token from the `/join/{token}` URL.
+                displayName:
+                  type: string
+                  minLength: 2
+                  maxLength: 40
+                  description: Trimmed, then truncated to 40 characters.
+                  examples: ['Sam Okafor']
+      responses:
+        '200':
+          description: Joined. Issues the participant credential.
+          headers:
+            Set-Cookie:
+              description: Optional participant cookie, if not returning a bearer token.
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/JoinResult'
+                  - type: object
+                    properties:
+                      participantToken:
+                        type: string
+                        description: |
+                          Bearer credential scoped to this participant and session.
+                          Not consumed by the frontend today — see assumption 1.
+        '400':
+          description: Name missing or too short.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: invalid_display_name, message: Please enter your name. }
+        '403':
+          description: Link revoked, expired, or unusable.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                revoked:
+                  value: { code: link_revoked, message: This link has been revoked by the interviewer. }
+                expired:
+                  value: { code: link_expired, message: This link has expired. }
+                ended:
+                  value: { code: session_ended, message: This interview has ended. }
+                archived:
+                  value: { code: session_archived, message: This interview is no longer available. }
+        '404':
+          description: Unknown token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: link_invalid, message: This link is not valid. }
+        '409':
+          description: Session at capacity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: session_full, message: This interview is full. }
+
+  # ---------------------------------------------------------------- canvas --
+
+  /sessions/{sessionId}/canvas:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [canvas]
+      operationId: getCanvas
+      x-client-method: InterviewApi.getCanvas
+      summary: Fetch the current canvas snapshot.
+      description: |
+        Readable by any active participant. Returns the materialised document — every
+        live element plus the monotonic `cursor` marking the last applied operation.
+
+        A client that has a snapshot at cursor N and then receives `document_update`
+        envelopes with cursors N+1, N+2 … is fully converged; this is the anchor the
+        realtime channel builds on.
+      security:
+        - interviewerSession: []
+        - participantToken: []
+      responses:
+        '200':
+          description: The snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CanvasSnapshot' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  /sessions/{sessionId}/canvas/clear:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [canvas]
+      operationId: clearCanvas
+      x-client-method: InterviewApi.clearCanvas
+      summary: Clear the whole canvas.
+      description: |
+        Owner only, even though it takes an `actorId` — the mock calls `requireOwner`
+        and then attributes the operation to the passed participant. Modelled as POST
+        rather than DELETE because it carries a body.
+
+        This is **not** a separate mutation path: it commits a normal `{ type: "clear" }`
+        operation through the same log as realtime edits, advancing the cursor and
+        fanning out a `document_update` to everyone in the room. Clients converge on it
+        exactly like any other edit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actorId]
+              properties:
+                actorId:
+                  type: string
+                  description: |
+                    Participant id to attribute the clear to — the caller's own
+                    participant id, not their user id.
+                  examples: ['pt_m1a2b3c4d5']
+      responses:
+        '204':
+          description: Cleared. A `document_update` has been broadcast.
+        '403': { $ref: '#/components/responses/OwnerOnly' }
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+  # -------------------------------------------------------------- realtime --
+
+  /sessions/{sessionId}/room:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [realtime]
+      operationId: connectRoom
+      x-client-method: InterviewApi.connect
+      summary: WebSocket upgrade for canvas ops and presence.
+      description: |
+        Backs `InterviewApi.connect(sessionId, participantId, onMessage, onStatus)`.
+        OpenAPI cannot describe a WebSocket session, so this documents the handshake and
+        the message contract lives in the `ServerMessage` and `ClientMessage` schemas
+        below.
+
+        **Handshake.** `GET` with `Upgrade: websocket` on
+        `wss://{host}/api/v1/sessions/{sessionId}/room?participantId={participantId}`.
+        The caller must be an active participant of the session; anyone else is rejected.
+        The mock's rejection path is informative — rather than dropping the socket
+        silently it delivers `{ type: "error", code: "forbidden", message: "You are not a
+        participant of this session." }` and then reports status `offline`, so the UI can
+        explain itself. A real server should either refuse the upgrade with 403 or accept
+        and send that same error frame before closing.
+
+        **On connect,** the server registers the participant in presence and sends
+        `room_joined` carrying a full snapshot plus the current roster, then broadcasts
+        `presence_update` to everyone else. The client treats every `room_joined` as
+        authoritative and replaces local state with it — this is also the reconnect
+        convergence path, so the server should re-send `room_joined` after any gap rather
+        than attempting to replay a backlog.
+
+        **Write authorisation is evaluated per message, not at connect time**, because a
+        candidate's permission can change mid-session. An incoming `ops` frame is
+        accepted only if all of:
+        - session state is neither `ended` nor `archived`;
+        - the sender's role is not `observer`;
+        - if the sender's role is `candidate`, `session.candidateEditingEnabled` is true.
+
+        A rejected write gets `{ type: "error", code: "editing_locked", message: "Editing
+        is locked for you right now." }` followed by a fresh `room_joined`, which snaps
+        the client's optimistically-applied edit back out. Do not silently drop it: the
+        client has already rendered the change locally.
+
+        **Ordering and idempotency.** Each accepted op is assigned a monotonically
+        increasing `cursor` and an envelope, then fanned out to all members including the
+        sender. The server drops any op whose `clientOperationId` it has already applied,
+        which makes retry-after-reconnect safe.
+
+        **Presence** is ephemeral: cursor position and selection, broadcast to the room
+        and discarded on disconnect. It is never persisted. Note that
+        `session.cursorsVisible` gates *rendering* of remote cursors in the client; the
+        server may still broadcast them.
+      security:
+        - interviewerSession: []
+        - participantToken: []
+      parameters:
+        - name: participantId
+          in: query
+          required: true
+          description: The connecting participant. Must match the credential.
+          schema: { type: string, examples: ['pt_m1a2b3c4d5'] }
+        - name: Upgrade
+          in: header
+          required: true
+          schema: { type: string, const: websocket }
+      responses:
+        '101':
+          description: Switching protocols. See `ServerMessage` / `ClientMessage`.
+        '403':
+          description: Not an active participant of this session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example:
+                code: forbidden
+                message: You are not a participant of this session.
+        '404': { $ref: '#/components/responses/SessionNotFound' }
+
+components:
+
+  securitySchemes:
+    interviewerSession:
+      type: apiKey
+      in: cookie
+      name: lw_session
+      description: |
+        Interviewer identity, established by `POST /auth/sign-in` and cleared by
+        `POST /auth/sign-out`. Identifies a `User`, which is what owner checks resolve
+        against. See assumption 1 — the mock has no wire credential, so the cookie is
+        specified here rather than observed.
+    participantToken:
+      type: http
+      scheme: bearer
+      description: |
+        Guest credential issued by `POST /join`, scoped to one participant in one
+        session. Carries no user identity. Must stop working once the participant's
+        `leftAt` is set. See assumption 1: the frontend currently persists only the
+        `participantId` in `sessionStorage` and would need a small change to send this.
+
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      description: Session identifier, prefixed `ses_`.
+      schema: { type: string, examples: ['ses_ratelimiter'] }
+
+  responses:
+    BadRequest:
+      description: Malformed or invalid request body.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: No valid interviewer session.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: unauthenticated, message: Not authenticated }
+    Forbidden:
+      description: Authenticated, but not a member of this session.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: forbidden, message: 'Forbidden' }
+    OwnerOnly:
+      description: |
+        The caller is not the session owner. Guarded by `requireOwner` in the mock, which
+        compares `session.ownerUserId` against the current user.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: forbidden, message: 'Forbidden: owner only' }
+    SessionNotFound:
+      description: No session with that id.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: not_found, message: Session not found }
+
+  schemas:
+
+    Error:
+      type: object
+      required: [code, message]
+      description: |
+        Uniform error body. `message` is **user-facing copy** — the UI prints it
+        verbatim (see `frontend/src/routes/join.$token.tsx`). `code` is for programmatic
+        handling and is never displayed.
+      properties:
+        code:
+          type: string
+          description: Stable machine-readable identifier.
+          examples: ['forbidden']
+        message:
+          type: string
+          description: Human-readable sentence, shown directly to the end user.
+          examples: ['This link has expired.']
+
+    Role:
+      type: string
+      enum: [owner, interviewer, candidate, observer]
+      description: |
+        `owner` created the session. `interviewer` is a signed-in collaborator.
+        `candidate` may edit only while `candidateEditingEnabled`. `observer` is
+        always read-only.
+
+    GuestRole:
+      type: string
+      enum: [candidate, observer]
+      description: The subset of roles a guest link can grant.
+
+    SessionState:
+      type: string
+      enum: [draft, live, ended, archived]
+
+    User:
+      type: object
+      required: [id, email, displayName, createdAt]
+      properties:
+        id: { type: string, examples: ['user_owner'] }
+        email: { type: string, format: email }
+        displayName:
+          type: string
+          description: Defaults to the local part of the email at first sign-in.
+        createdAt: { type: string, format: date-time }
+
+    InterviewSession:
+      type: object
+      required:
+        [id, ownerUserId, title, prompt, state, candidateEditingEnabled,
+         cursorsVisible, scheduledAt, startedAt, endedAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, examples: ['ses_ratelimiter'] }
+        ownerUserId: { type: string }
+        title: { type: string, examples: ['Design global rate limiter'] }
+        prompt:
+          type: string
+          description: The question shown to the candidate. May be empty.
+        state: { $ref: '#/components/schemas/SessionState' }
+        candidateEditingEnabled:
+          type: boolean
+          description: |
+            Whether participants with role `candidate` may write. Forced to `false` when
+            the session ends. Enforced server-side on every incoming op — the client's
+            own check is a UI affordance only.
+        cursorsVisible:
+          type: boolean
+          description: Client-side rendering toggle for remote cursors.
+        scheduledAt: { type: [string, 'null'], format: date-time }
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Set once, on first start; not reset by a later start.
+        endedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt:
+          type: string
+          format: date-time
+          description: Refreshed on every mutation. Sort key for `GET /sessions`.
+
+    SessionPatch:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      description: |
+        Sparse update. Exactly the mutable subset the client can send — derived from the
+        `Partial<Pick<InterviewSession, …>>` type on `InterviewApi.updateSession`.
+        Lifecycle fields (`state`, `startedAt`, `endedAt`) are deliberately not patchable;
+        they move only through the start/end/archive operations.
+      properties:
+        title: { type: string }
+        prompt: { type: string }
+        candidateEditingEnabled: { type: boolean }
+        cursorsVisible: { type: boolean }
+        scheduledAt: { type: [string, 'null'], format: date-time }
+
+    GuestLink:
+      type: object
+      required:
+        [id, sessionId, token, roleGranted, expiresAt, maxUses, uses, revokedAt, createdAt]
+      properties:
+        id: { type: string, examples: ['lnk_m1a2b3c4d5'] }
+        sessionId: { type: string }
+        token:
+          type: string
+          description: |
+            Opaque, at least 128 bits of entropy (the mock emits 16 random bytes as 32
+            hex characters). Embedded in the shared URL as `/join/{token}`.
+          examples: ['9f2c1ab47e5d40318c6b0a7d2e5f1b93']
+        roleGranted: { $ref: '#/components/schemas/GuestRole' }
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+          description: Null means no expiry. The mock never sets one.
+        maxUses:
+          type: [integer, 'null']
+          description: |
+            Capacity cap, defaulting to 10. Compared against the count of *currently
+            active* participants, so it behaves as a concurrent-seat limit rather than a
+            lifetime redemption count. Null means unlimited.
+        uses:
+          type: integer
+          description: Cumulative successful redemptions.
+        revokedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Soft-revocation stamp. Revoked links stay queryable but unusable.
+        createdAt: { type: string, format: date-time }
+
+    Participant:
+      type: object
+      required: [id, sessionId, userId, displayName, role, color, joinedAt, leftAt]
+      properties:
+        id: { type: string, examples: ['pt_m1a2b3c4d5'] }
+        sessionId: { type: string }
+        userId:
+          type: [string, 'null']
+          description: The signed-in user, or null for guests who joined by token.
+        displayName: { type: string, maxLength: 40 }
+        role: { $ref: '#/components/schemas/Role' }
+        color:
+          type: string
+          enum: [amberdeep, warm, remote, live]
+          description: |
+            Palette key assigned round-robin on join, used to tint the participant's
+            cursor and selection outline.
+
+            **Not a free-form colour.** The value is a CSS custom property name minus its
+            `--` prefix: the client interpolates it directly as `var(--${p.color})`
+            (`frontend/src/components/interview/CanvasStage.tsx`). Only the four keys in
+            this enum are defined in `frontend/src/styles.css`; any other value silently
+            resolves to an invalid `var()` and renders uncoloured. Assign round-robin in
+            the order listed, matching `PARTICIPANT_COLORS` in
+            `frontend/src/services/mock/store.ts`.
+
+            Note `amberdeep` is one token (a darker amber, distinct from `amber`), not
+            two. `amber` itself is deliberately absent from this palette — it is reserved
+            for highlighter strokes.
+          examples: ['warm']
+        joinedAt: { type: string, format: date-time }
+        leftAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Soft-leave stamp. Non-null participants are excluded from
+            `GET /sessions/{sessionId}/participants` and lose room access.
+
+    JoinResult:
+      type: object
+      required: [session, participant]
+      description: What both join paths return — the room to enter and who you are in it.
+      properties:
+        session: { $ref: '#/components/schemas/InterviewSession' }
+        participant: { $ref: '#/components/schemas/Participant' }
+
+    # ---- canvas document ----
+
+    BaseElement:
+      type: object
+      required: [id, kind, createdBy, updatedAt]
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          enum: [node, sticky, text, stroke, connector]
+        createdBy:
+          type: string
+          description: Participant id of the author.
+        updatedAt:
+          type: integer
+          format: int64
+          description: |
+            Epoch **milliseconds as a number** — deliberately unlike the ISO-8601 strings
+            used everywhere else in this API. Canvas elements carry numeric clocks for
+            cheap comparison during merge.
+
+    NodeElement:
+      allOf:
+        - $ref: '#/components/schemas/BaseElement'
+        - type: object
+          required: [kind, componentType, label, description, x, y, width, height]
+          properties:
+            kind: { const: node }
+            componentType:
+              type: string
+              description: Key into the client's component library (e.g. cache, queue, db).
+            label: { type: string }
+            description: { type: string }
+            x: { type: number }
+            y: { type: number }
+            width: { type: number }
+            height: { type: number }
+
+    StickyElement:
+      allOf:
+        - $ref: '#/components/schemas/BaseElement'
+        - type: object
+          required: [kind, text, x, y, width, height]
+          properties:
+            kind: { const: sticky }
+            text: { type: string }
+            x: { type: number }
+            y: { type: number }
+            width: { type: number }
+            height: { type: number }
+
+    TextElement:
+      allOf:
+        - $ref: '#/components/schemas/BaseElement'
+        - type: object
+          required: [kind, text, x, y]
+          properties:
+            kind: { const: text }
+            text: { type: string }
+            x: { type: number }
+            y: { type: number }
+
+    StrokeElement:
+      allOf:
+        - $ref: '#/components/schemas/BaseElement'
+        - type: object
+          required: [kind, points, color, width, highlighter]
+          properties:
+            kind: { const: stroke }
+            points:
+              type: array
+              description: Flat interleaved coordinates — [x0, y0, x1, y1, …].
+              items: { type: number }
+            color:
+              type: string
+              enum: [ink, amber, remote, warm]
+            width: { type: number }
+            highlighter:
+              type: boolean
+              description: Renders semi-transparent and behind other elements.
+
+    ConnectorElement:
+      allOf:
+        - $ref: '#/components/schemas/BaseElement'
+        - type: object
+          required: [kind, fromId, toId, label, style, dashed, arrowEnd]
+          properties:
+            kind: { const: connector }
+            fromId:
+              type: string
+              description: |
+                Source element id. Connectors are deleted implicitly when either endpoint
+                is deleted — the client prunes them locally, so the server must do the
+                same when applying a `delete` op or the two will diverge.
+            toId: { type: string }
+            label: { type: string }
+            style:
+              type: string
+              enum: [straight, elbow, curved]
+            dashed: { type: boolean }
+            arrowEnd: { type: boolean }
+
+    CanvasElement:
+      oneOf:
+        - $ref: '#/components/schemas/NodeElement'
+        - $ref: '#/components/schemas/StickyElement'
+        - $ref: '#/components/schemas/TextElement'
+        - $ref: '#/components/schemas/StrokeElement'
+        - $ref: '#/components/schemas/ConnectorElement'
+      discriminator:
+        propertyName: kind
+        mapping:
+          node: '#/components/schemas/NodeElement'
+          sticky: '#/components/schemas/StickyElement'
+          text: '#/components/schemas/TextElement'
+          stroke: '#/components/schemas/StrokeElement'
+          connector: '#/components/schemas/ConnectorElement'
+
+    CanvasOpUpsert:
+      type: object
+      required: [type, element]
+      description: Insert or replace an element wholesale, keyed by `element.id`.
+      properties:
+        type: { const: upsert }
+        element: { $ref: '#/components/schemas/CanvasElement' }
+
+    CanvasOpDelete:
+      type: object
+      required: [type, id]
+      description: Remove an element, and any connector attached to it.
+      properties:
+        type: { const: delete }
+        id: { type: string }
+
+    CanvasOpClear:
+      type: object
+      required: [type]
+      description: Remove every element.
+      properties:
+        type: { const: clear }
+
+    CanvasOp:
+      description: |
+        A single document mutation. The whole editing model is last-write-wins upserts
+        plus deletes — there is no OT or CRDT transform on the wire.
+      oneOf:
+        - $ref: '#/components/schemas/CanvasOpUpsert'
+        - $ref: '#/components/schemas/CanvasOpDelete'
+        - $ref: '#/components/schemas/CanvasOpClear'
+      discriminator:
+        propertyName: type
+        mapping:
+          upsert: '#/components/schemas/CanvasOpUpsert'
+          delete: '#/components/schemas/CanvasOpDelete'
+          clear: '#/components/schemas/CanvasOpClear'
+
+    CanvasOperationEnvelope:
+      type: object
+      required: [id, clientOperationId, actorId, op, serverReceivedAt, cursor]
+      description: A server-sequenced operation, as replayed to every room member.
+      properties:
+        id:
+          type: string
+          description: Server-assigned operation id.
+        clientOperationId:
+          type: string
+          description: |
+            Client-generated idempotency key. The server drops any op whose key it has
+            already applied, so a client may safely resend after a reconnect. See
+            assumption 3.
+        actorId:
+          type: string
+          description: Participant id of the author.
+        op: { $ref: '#/components/schemas/CanvasOp' }
+        serverReceivedAt:
+          type: integer
+          format: int64
+          description: Epoch milliseconds, server clock.
+        cursor:
+          type: integer
+          description: |
+            Monotonic per-session sequence number. Strictly increasing; a batch of ops
+            submitted together receives consecutive cursors.
+
+    CanvasSnapshot:
+      type: object
+      required: [sessionId, cursor, elements, updatedAt]
+      properties:
+        sessionId: { type: string }
+        cursor:
+          type: integer
+          description: Sequence number of the last operation folded into `elements`.
+        elements:
+          type: array
+          items: { $ref: '#/components/schemas/CanvasElement' }
+        updatedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 — unlike the numeric `updatedAt` on elements.
+
+    # ---- realtime messages ----
+
+    PresenceState:
+      type: object
+      required: [participantId, displayName, role, color, cursor, selection, online]
+      description: Ephemeral per-participant state. Never persisted.
+      properties:
+        participantId: { type: string }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        color: { type: string }
+        cursor:
+          description: Canvas-space pointer position, or null when the pointer is away.
+          oneOf:
+            - type: object
+              required: [x, y]
+              properties:
+                x: { type: number }
+                y: { type: number }
+            - type: 'null'
+        selection:
+          type: array
+          items: { type: string }
+          description: Element ids the participant currently has selected.
+        online: { type: boolean }
+
+    RoomJoinedMessage:
+      type: object
+      required: [type, snapshot, presence]
+      description: |
+        Full state sync. Sent on connect, and again after a reconnect or a rejected
+        write. The client discards local state and adopts this wholesale, so it is the
+        only convergence mechanism — there is no delta-replay path.
+      properties:
+        type: { const: room_joined }
+        snapshot: { $ref: '#/components/schemas/CanvasSnapshot' }
+        presence:
+          type: array
+          items: { $ref: '#/components/schemas/PresenceState' }
+
+    DocumentUpdateMessage:
+      type: object
+      required: [type, ops]
+      description: |
+        Ordered batch of newly sequenced operations, delivered to all members including
+        the author. May legitimately be empty.
+      properties:
+        type: { const: document_update }
+        ops:
+          type: array
+          items: { $ref: '#/components/schemas/CanvasOperationEnvelope' }
+
+    PresenceUpdateMessage:
+      type: object
+      required: [type, presence]
+      description: The complete current roster, not a delta.
+      properties:
+        type: { const: presence_update }
+        presence:
+          type: array
+          items: { $ref: '#/components/schemas/PresenceState' }
+
+    PermissionChangedMessage:
+      type: object
+      required: [type, session]
+      description: |
+        Sent after `PATCH /sessions/{id}` and after start. Carries the whole session so
+        clients can re-evaluate whether they may edit.
+      properties:
+        type: { const: permission_changed }
+        session: { $ref: '#/components/schemas/InterviewSession' }
+
+    SessionEndedMessage:
+      type: object
+      required: [type, session]
+      description: Sent after `POST /sessions/{id}/end`. Editing stops for everyone.
+      properties:
+        type: { const: session_ended }
+        session: { $ref: '#/components/schemas/InterviewSession' }
+
+    RoomErrorMessage:
+      type: object
+      required: [type, code, message]
+      description: |
+        Non-fatal, per-frame error. `message` is user-facing; the client shows it as a
+        transient banner and clears it after about four seconds.
+      properties:
+        type: { const: error }
+        code:
+          type: string
+          enum: [forbidden, editing_locked, offline]
+        message: { type: string }
+
+    ServerMessage:
+      description: |
+        Server-to-client frames over the room WebSocket. Taken verbatim from the
+        `ServerMessage` union in `frontend/src/services/types.ts` — the client switches
+        exhaustively on `type`, so an unrecognised value is silently ignored.
+      oneOf:
+        - $ref: '#/components/schemas/RoomJoinedMessage'
+        - $ref: '#/components/schemas/DocumentUpdateMessage'
+        - $ref: '#/components/schemas/PresenceUpdateMessage'
+        - $ref: '#/components/schemas/PermissionChangedMessage'
+        - $ref: '#/components/schemas/SessionEndedMessage'
+        - $ref: '#/components/schemas/RoomErrorMessage'
+      discriminator:
+        propertyName: type
+        mapping:
+          room_joined: '#/components/schemas/RoomJoinedMessage'
+          document_update: '#/components/schemas/DocumentUpdateMessage'
+          presence_update: '#/components/schemas/PresenceUpdateMessage'
+          permission_changed: '#/components/schemas/PermissionChangedMessage'
+          session_ended: '#/components/schemas/SessionEndedMessage'
+          error: '#/components/schemas/RoomErrorMessage'
+
+    ClientOpsMessage:
+      type: object
+      required: [type, ops]
+      description: |
+        Submit a batch of edits. Backs `RoomHandle.sendOps`. The client applies these
+        optimistically before sending, which is why rejection must be answered with a
+        corrective `room_joined` rather than silence.
+      properties:
+        type: { const: ops }
+        ops:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [clientOperationId, op]
+            properties:
+              clientOperationId:
+                type: string
+                description: Client-generated idempotency key, unique per session.
+              op: { $ref: '#/components/schemas/CanvasOp' }
+
+    ClientPresenceMessage:
+      type: object
+      required: [type]
+      description: |
+        Sparse presence patch. Backs `RoomHandle.updatePresence`, whose type is
+        `Partial<Pick<PresenceState, "cursor" | "selection">>` — either key may be
+        absent, and absence means unchanged. High frequency; expect cursor updates at
+        pointer-move rate and throttle or coalesce accordingly.
+      properties:
+        type: { const: presence }
+        cursor:
+          description: Present only when the cursor changed. Null means pointer away.
+          oneOf:
+            - type: object
+              required: [x, y]
+              properties:
+                x: { type: number }
+                y: { type: number }
+            - type: 'null'
+        selection:
+          type: array
+          items: { type: string }
+          description: Present only when the selection changed.
+
+    ClientMessage:
+      description: |
+        Client-to-server frames. **Designed, not observed** — see assumption 2. The
+        `RoomHandle` methods `sendOps` and `updatePresence` are in-process callbacks in
+        the mock, so this is the minimal wire form that supports them.
+      oneOf:
+        - $ref: '#/components/schemas/ClientOpsMessage'
+        - $ref: '#/components/schemas/ClientPresenceMessage'
+      discriminator:
+        propertyName: type
+        mapping:
+          ops: '#/components/schemas/ClientOpsMessage'
+          presence: '#/components/schemas/ClientPresenceMessage'
