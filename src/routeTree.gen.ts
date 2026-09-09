@@ -10,12 +10,18 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as JoinTokenRouteImport } from './routes/join.$token'
 import { Route as RoomSessionIdRouteImport } from './routes/room.$sessionId'
 import { Route as SessionsNewRouteImport } from './routes/sessions.new'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const JoinTokenRoute = JoinTokenRouteImport.update({
+  id: '/join/$token',
+  path: '/join/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RoomSessionIdRoute = RoomSessionIdRouteImport.update({
@@ -31,30 +37,34 @@ const SessionsNewRoute = SessionsNewRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/join/$token': typeof JoinTokenRoute
   '/room/$sessionId': typeof RoomSessionIdRoute
   '/sessions/new': typeof SessionsNewRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/join/$token': typeof JoinTokenRoute
   '/room/$sessionId': typeof RoomSessionIdRoute
   '/sessions/new': typeof SessionsNewRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/join/$token': typeof JoinTokenRoute
   '/room/$sessionId': typeof RoomSessionIdRoute
   '/sessions/new': typeof SessionsNewRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/room/$sessionId' | '/sessions/new'
+  fullPaths: '/' | '/join/$token' | '/room/$sessionId' | '/sessions/new'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/room/$sessionId' | '/sessions/new'
-  id: '__root__' | '/' | '/room/$sessionId' | '/sessions/new'
+  to: '/' | '/join/$token' | '/room/$sessionId' | '/sessions/new'
+  id: '__root__' | '/' | '/join/$token' | '/room/$sessionId' | '/sessions/new'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  JoinTokenRoute: typeof JoinTokenRoute
   RoomSessionIdRoute: typeof RoomSessionIdRoute
   SessionsNewRoute: typeof SessionsNewRoute
 }
@@ -66,6 +76,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/join/$token': {
+      id: '/join/$token'
+      path: '/join/$token'
+      fullPath: '/join/$token'
+      preLoaderRoute: typeof JoinTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/room/$sessionId': {
@@ -87,6 +104,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  JoinTokenRoute: JoinTokenRoute,
   RoomSessionIdRoute: RoomSessionIdRoute,
   SessionsNewRoute: SessionsNewRoute,
 }
