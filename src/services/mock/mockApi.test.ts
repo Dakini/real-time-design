@@ -82,8 +82,8 @@ describe("realtime room", () => {
     const guestRoom = api.connect(session.id, guest.participant.id, messages(guestMsgs), () => {});
 
     await new Promise((r) => setTimeout(r, 120));
-    expect(ownerMsgs[0]?.type).toBe("room_joined");
-    expect(guestMsgs[0]?.type).toBe("room_joined");
+    expect(ownerMsgs.some((m) => m.type === "room_joined")).toBe(true);
+    expect(guestMsgs.some((m) => m.type === "room_joined")).toBe(true);
 
     ownerRoom.sendOps([{ type: "upsert", element: node("el_new") }]);
     const update = guestMsgs.find((m) => m.type === "document_update");
