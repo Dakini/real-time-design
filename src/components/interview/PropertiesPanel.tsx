@@ -15,7 +15,7 @@ export function PropertiesPanel({ session, selected, canEdit, onCommit }: Props)
   const patch = (next: CanvasElement) => onCommit([{ type: "upsert", element: { ...next, updatedAt: Date.now() } }]);
 
   return (
-    <aside aria-label="Properties" className="flex w-72 shrink-0 flex-col overflow-y-auto border-l border-line bg-panel">
+    <aside aria-label="Properties" className="flex w-72 min-h-0 flex-1 shrink-0 flex-col overflow-y-auto border-l border-line bg-panel">
       <div className="border-b border-line p-4">
         <button
           type="button"

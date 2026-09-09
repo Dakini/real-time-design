@@ -264,7 +264,7 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
           )}
         </div>
 
-        <div className="flex min-h-0 flex-col">
+        <div className="flex h-full min-h-0 flex-col">
           {isOwner && (
             <div className="space-y-2 border-b border-l border-line bg-panel p-4">
               <p className="font-mono text-[10px] tracking-wider text-muted uppercase">Session controls</p>
