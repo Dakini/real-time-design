@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { api, mockApi } from "@/services";
+import { api } from "@/services";
 import type { GuestLink, Participant, Role } from "@/services/types";
 import { useRoom } from "@/features/room/useRoom";
 import { recallParticipant, rememberParticipant } from "@/features/room/participantStore";
@@ -16,9 +16,15 @@ export const Route = createFileRoute("/room/$sessionId")({
   head: () => ({
     meta: [
       { title: "Live interview canvas — Linewarmer" },
-      { name: "description", content: "Collaborate on a shared system design canvas in real time." },
+      {
+        name: "description",
+        content: "Collaborate on a shared system design canvas in real time.",
+      },
       { property: "og:title", content: "Live interview canvas — Linewarmer" },
-      { property: "og:description", content: "Collaborate on a shared system design canvas in real time." },
+      {
+        property: "og:description",
+        content: "Collaborate on a shared system design canvas in real time.",
+      },
     ],
   }),
   component: RoomScreen,
@@ -51,7 +57,8 @@ function RoomScreen() {
         });
         if (!cancelled) setMe(participant);
       } catch (err) {
-        if (!cancelled) setJoinError(err instanceof Error ? err.message : "Could not join this session.");
+        if (!cancelled)
+          setJoinError(err instanceof Error ? err.message : "Could not join this session.");
       }
     };
     void bootstrap();
@@ -85,7 +92,15 @@ function RoomScreen() {
   return <Room sessionId={sessionId} participantId={me.id} role={me.role} />;
 }
 
-function Room({ sessionId, participantId, role }: { sessionId: string; participantId: string; role: Role }) {
+function Room({
+  sessionId,
+  participantId,
+  role,
+}: {
+  sessionId: string;
+  participantId: string;
+  role: Role;
+}) {
   const room = useRoom(sessionId, participantId, role);
   const [tool, setTool] = useState<Tool>("select");
   const [libraryOpen, setLibraryOpen] = useState(true);
@@ -127,7 +142,8 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
   }, [room.elements]);
 
   const share = async () => {
-    const live = links.find((l) => !l.revokedAt) ?? (await api.createGuestLink(sessionId, "candidate"));
+    const live =
+      links.find((l) => !l.revokedAt) ?? (await api.createGuestLink(sessionId, "candidate"));
     setLinks(await api.listGuestLinks(sessionId));
     const url = `${window.location.origin}/join/${live.token}`;
     try {
@@ -173,7 +189,17 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
             <button
               type="button"
               onClick={() => {
-                const blob = new Blob([mockApi.exportJson(sessionId)], { type: "application/json" });
+                const exportPayload = {
+                  session,
+                  canvas: {
+                    sessionId,
+                    elements: room.elements,
+                    updatedAt: new Date().toISOString(),
+                  },
+                };
+                const blob = new Blob([JSON.stringify(exportPayload, null, 2)], {
+                  type: "application/json",
+                });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
@@ -210,7 +236,11 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
           disabled={!room.canEdit}
         />
         {libraryOpen && (
-          <ComponentLibrary pending={pending} onPick={setPending} onClose={() => setLibraryOpen(false)} />
+          <ComponentLibrary
+            pending={pending}
+            onPick={setPending}
+            onClose={() => setLibraryOpen(false)}
+          />
         )}
 
         <div id="canvas-stage" className="relative min-w-0 flex-1">
@@ -233,19 +263,28 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-3">
             <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-1 shadow-sm">
-              <BarButton label="Zoom out" onClick={() => setView((v) => ({ ...v, scale: Math.max(0.2, v.scale - 0.1) }))}>
+              <BarButton
+                label="Zoom out"
+                onClick={() => setView((v) => ({ ...v, scale: Math.max(0.2, v.scale - 0.1) }))}
+              >
                 −
               </BarButton>
               <span className="w-12 text-center font-mono text-[11px] text-muted">
                 {Math.round(view.scale * 100)}%
               </span>
-              <BarButton label="Zoom in" onClick={() => setView((v) => ({ ...v, scale: Math.min(2, v.scale + 0.1) }))}>
+              <BarButton
+                label="Zoom in"
+                onClick={() => setView((v) => ({ ...v, scale: Math.min(2, v.scale + 0.1) }))}
+              >
                 +
               </BarButton>
               <BarButton label="Zoom to fit" onClick={zoomToFit}>
                 Fit
               </BarButton>
-              <BarButton label="Reset view" onClick={() => setView({ scale: 1, offsetX: 0, offsetY: 0 })}>
+              <BarButton
+                label="Reset view"
+                onClick={() => setView({ scale: 1, offsetX: 0, offsetY: 0 })}
+              >
                 Reset
               </BarButton>
               <BarButton label="Undo" onClick={room.undo} disabled={!room.canUndo || !room.canEdit}>
@@ -267,13 +306,17 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
         <div className="flex h-full min-h-0 flex-col">
           {isOwner && (
             <div className="space-y-2 border-b border-l border-line bg-panel p-4">
-              <p className="font-mono text-[10px] tracking-wider text-muted uppercase">Session controls</p>
+              <p className="font-mono text-[10px] tracking-wider text-muted uppercase">
+                Session controls
+              </p>
               <label className="flex items-center justify-between gap-2 text-sm text-ink">
                 Candidate editing
                 <input
                   type="checkbox"
                   checked={session.candidateEditingEnabled}
-                  onChange={(e) => void api.updateSession(sessionId, { candidateEditingEnabled: e.target.checked })}
+                  onChange={(e) =>
+                    void api.updateSession(sessionId, { candidateEditingEnabled: e.target.checked })
+                  }
                 />
               </label>
               <label className="flex items-center justify-between gap-2 text-sm text-ink">
@@ -281,7 +324,9 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
                 <input
                   type="checkbox"
                   checked={session.cursorsVisible}
-                  onChange={(e) => void api.updateSession(sessionId, { cursorsVisible: e.target.checked })}
+                  onChange={(e) =>
+                    void api.updateSession(sessionId, { cursorsVisible: e.target.checked })
+                  }
                 />
               </label>
               {session.state === "draft" && (
@@ -311,7 +356,12 @@ function Room({ sessionId, participantId, role }: { sessionId: string; participa
                 <button
                   type="button"
                   onClick={async () => {
-                    if (!window.confirm("Clear the whole canvas? This can be undone by the last snapshot.")) return;
+                    if (
+                      !window.confirm(
+                        "Clear the whole canvas? This can be undone by the last snapshot.",
+                      )
+                    )
+                      return;
                     await api.clearCanvas(sessionId, participantId);
                   }}
                   className="w-full rounded border border-destructive px-2 py-1.5 text-xs font-medium text-destructive hover:bg-destructive hover:text-destructive-foreground"

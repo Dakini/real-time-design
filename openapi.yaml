@@ -798,6 +798,16 @@ paths:
           required: true
           description: The connecting participant. Must match the credential.
           schema: { type: string, examples: ['pt_m1a2b3c4d5'] }
+        - name: token
+          in: query
+          required: false
+          description: |
+            Participant bearer token, as an alternative to the `Authorization` header.
+            Browsers cannot set custom headers on a WebSocket handshake, so a browser
+            client authenticating as a guest must pass its `participantToken` here
+            instead. Ignored for interviewer connections, which authenticate via the
+            `lw_session` cookie sent automatically by the browser.
+          schema: { type: string }
         - name: Upgrade
           in: header
           required: true

@@ -29,10 +29,16 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   const refresh = () =>
-    api.listSessions().then((s) => {
-      setSessions(s);
-      setLoading(false);
-    });
+    api
+      .listSessions()
+      .then((s) => {
+        setSessions(s);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        setLoading(false);
+        toast.error(err instanceof Error ? err.message : "Could not load interviews.");
+      });
 
   useEffect(() => {
     void refresh();
@@ -40,7 +46,8 @@ function Dashboard() {
 
   const copyLink = async (session: InterviewSession) => {
     const links = await api.listGuestLinks(session.id);
-    const live = links.find((l) => !l.revokedAt) ?? (await api.createGuestLink(session.id, "candidate"));
+    const live =
+      links.find((l) => !l.revokedAt) ?? (await api.createGuestLink(session.id, "candidate"));
     const url = `${window.location.origin}/join/${live.token}`;
     try {
       await navigator.clipboard.writeText(url);

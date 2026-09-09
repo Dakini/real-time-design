@@ -5,21 +5,29 @@ export interface StoredParticipant {
   participantId: string;
   displayName: string;
   role: string;
+  /** Bearer credential for guests, issued by `POST /join`. Absent for owners, who use the session cookie. */
+  participantToken?: string;
 }
 
 function readAll(): Record<string, StoredParticipant> {
   if (typeof window === "undefined") return {};
   try {
-    return JSON.parse(window.sessionStorage.getItem(KEY) ?? "{}") as Record<string, StoredParticipant>;
+    return JSON.parse(window.sessionStorage.getItem(KEY) ?? "{}") as Record<
+      string,
+      StoredParticipant
+    >;
   } catch {
     return {};
   }
 }
 
-export function rememberParticipant(entry: StoredParticipant): void {
+/** Merges with any existing entry for the session, so callers can update fields independently. */
+export function rememberParticipant(
+  entry: Partial<StoredParticipant> & Pick<StoredParticipant, "sessionId">,
+): void {
   if (typeof window === "undefined") return;
   const all = readAll();
-  all[entry.sessionId] = entry;
+  all[entry.sessionId] = { ...all[entry.sessionId], ...entry } as StoredParticipant;
   window.sessionStorage.setItem(KEY, JSON.stringify(all));
 }
 
