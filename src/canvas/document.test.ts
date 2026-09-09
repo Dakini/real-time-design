@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { applyOp, applyOps, boxOf, fitView, invert, UndoStack } from "./document";
-import type { CanvasElement } from "../services/types";
+import type { CanvasElement, NodeElement } from "../services/types";
 
-const node = (id: string, updatedAt = 1000): CanvasElement => ({
+const node = (id: string, updatedAt = 1000): NodeElement => ({
   id,
   kind: "node",
   componentType: "server",
