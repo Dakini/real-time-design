@@ -11,5 +11,9 @@ export default defineConfig({
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
+    // Ship a static, client-hydrated SPA shell so the app can be served as
+    // plain static files (e.g. by the Python backend) instead of requiring
+    // the Nitro/Cloudflare SSR server at runtime.
+    spa: { enabled: true },
   },
 });

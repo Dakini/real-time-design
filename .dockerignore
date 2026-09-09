@@ -1,0 +1,13 @@
+**/.git
+**/node_modules
+**/.output
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.DS_Store
+backend/linewarmer.db
+frontend/.wrangler
+_docs
+.claude
+.serena

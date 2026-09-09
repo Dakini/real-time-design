@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .database import SessionLocal, init_db
 from .db_models import UserRow
@@ -74,3 +76,18 @@ app.include_router(realtime.router, prefix=router_prefix)
 @app.get("/healthz", include_in_schema=False)
 def healthz() -> dict[str, bool]:
     return {"ok": True}
+
+
+# Serve the built frontend (see ../../Dockerfile) as a single-server deploy.
+# Absent in local dev, where the frontend runs on its own Vite dev server.
+frontend_dir = Path(os.environ.get("FRONTEND_DIST_DIR", Path(__file__).resolve().parent.parent / "static"))
+
+if frontend_dir.is_dir():
+    app.mount("/assets", StaticFiles(directory=frontend_dir / "assets"), name="frontend-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str) -> FileResponse:
+        candidate = frontend_dir / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(frontend_dir / "index.html")
