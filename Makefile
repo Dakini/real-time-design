@@ -1,7 +1,7 @@
-.PHONY: install install-backend install-frontend \
+.PHONY: install install-backend install-frontend install-e2e \
         dev backend frontend \
         kill kill-backend kill-frontend \
-        test test-backend test-integration \
+        test test-backend test-integration e2e \
         postgres docker-build docker-run \
         up down \
         clean
@@ -44,6 +44,9 @@ install-backend:
 install-frontend:
 	cd frontend && npm i
 
+install-e2e:
+	cd e2e && npm i && npx playwright install --with-deps chromium
+
 # Run backend (reload) and frontend dev server together; Ctrl+C stops both.
 dev:
 	$(MAKE) -j2 backend frontend
@@ -78,6 +81,14 @@ test-backend:
 # remapped, so stop the dev stack (`make down`) first or pass APP_PORT=<other>.
 test-integration:
 	uv run --project backend pytest integration -v
+
+# Browser-driven end-to-end suite (Playwright): builds the image, brings the
+# compose stack up under its own project/container names (e2e/docker-compose.e2e.yaml)
+# and drives the real interviewer/candidate flow across two browser contexts.
+# Requires `make install-e2e` once beforehand. Excluded from `make test` for
+# the same reason as test-integration: slow, and needs Docker.
+e2e:
+	cd e2e && npm test
 
 # Start Postgres, reusing the existing container and volume if they're already
 # there so data survives. Idempotent: safe to run when it's already up.
