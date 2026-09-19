@@ -72,6 +72,20 @@ Tables are created and seeded automatically on first startup, same as SQLite.
 > runtime. Either apply the change by hand (`ALTER TABLE …`) or start from a fresh volume
 > (`docker rm -f interview-canvas-db && docker volume rm interview-canvas-pgdata`).
 
+### Docker Compose
+
+`docker compose` brings Postgres and the app up together, with the app waiting on the
+database's healthcheck before it boots:
+
+```bash
+make up     # builds the image and starts both, detached
+make down
+```
+
+The app is published on **http://localhost:8100** (`APP_PORT` overrides it) and Postgres on
+`localhost:5432` (`PG_PORT`). The data lives in the named volume `interview-canvas-pgdata`,
+which is shared with `make postgres`, so it survives `make down`.
+
 ### Useful env vars
 
 | Var | Default | Purpose |
@@ -79,6 +93,24 @@ Tables are created and seeded automatically on first startup, same as SQLite.
 | `DATABASE_URL` | `sqlite:///./linewarmer.db` | Any SQLAlchemy-supported database URL; use `postgresql+psycopg://…` for Postgres |
 | `CORS_ORIGINS` | common local Vite/CRA ports | Comma-separated allowlist |
 | `COOKIE_SECURE` | `false` | Set `true` when serving over HTTPS |
+
+## Tests
+
+```bash
+make test               # backend unit tests, in-process against in-memory SQLite
+make test-integration   # builds the image, runs the compose stack, drives it over HTTP/WS
+```
+
+The integration suite in `integration/` covers what the unit suite structurally cannot: the
+image build, the frontend bundle the backend serves, Postgres actually being the store, and
+data surviving restarts. It takes a couple of minutes on a cold Docker cache and needs port
+8100 free — stop the dev stack (`make down`) first, or pass `APP_PORT=<other>`.
+
+It applies `docker-compose.integration.yaml` on top of `docker-compose.yaml`, which renames
+the containers and the data volume. Everything under test — the build, healthchecks,
+`depends_on` ordering, `DATABASE_URL` wiring — is the real thing; only the names differ, so
+the suite's teardown can never delete your development database. Use `IT_KEEP_STACK=1` to
+leave the stack up afterwards for poking at.
 
 ## Local development (no Docker)
 

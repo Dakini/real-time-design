@@ -1,7 +1,7 @@
 .PHONY: install install-backend install-frontend \
         dev backend frontend \
         kill kill-backend kill-frontend \
-        test test-backend \
+        test test-backend test-integration \
         postgres docker-build docker-run \
         up down \
         clean
@@ -11,7 +11,7 @@ FRONTEND_PORT := 5173
 
 # --- Docker ---------------------------------------------------------------
 IMAGE := linewarmer
-APP_PORT := 8000
+APP_PORT := 8100
 NETWORK := linewarmer-net
 
 PG_CONTAINER := interview-canvas-db
@@ -68,6 +68,16 @@ test: test-backend
 
 test-backend:
 	cd backend && uv run pytest
+
+# Integration tests: build the image, bring the compose stack up, and drive it
+# over HTTP/WebSockets on localhost:$(APP_PORT). Slow (a cold `npm ci` + Vite
+# build) and excluded from `make test` for that reason.
+#
+# Runs under an overlay that renames the containers and the data volume, so the
+# suite's teardown (`down -v`) cannot touch $(PG_VOLUME). The app port is not
+# remapped, so stop the dev stack (`make down`) first or pass APP_PORT=<other>.
+test-integration:
+	uv run --project backend pytest integration -v
 
 # Start Postgres, reusing the existing container and volume if they're already
 # there so data survives. Idempotent: safe to run when it's already up.

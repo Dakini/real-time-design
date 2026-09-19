@@ -34,7 +34,7 @@ services:
       # SQLAlchemy look for psycopg2, which isn't installed.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sdip}:${POSTGRES_PASSWORD:-sdip}@db:5432/${POSTGRES_DB:-sdip}
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8100}:8000"
     depends_on:
       db:
         condition: service_healthy
