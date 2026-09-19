@@ -8,6 +8,16 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
+
+# Vite inlines import.meta.env at build time, so the API URL is baked into the
+# bundle here — it cannot be changed by an env var on `docker run`. The backend
+# serves this bundle itself, so a same-origin relative path is correct and works
+# whatever host/port the container is published on. Without this the bundle
+# falls back to its dev default of http://localhost:8091, which the browser
+# cannot reach from the container's port (ERR_CONNECTION_REFUSED).
+ARG VITE_API_URL=/api/v1
+ENV VITE_API_URL=$VITE_API_URL
+
 # Builds a static, client-hydrated SPA shell (tanstackStart.spa.enabled in
 # vite.config.ts) instead of the Cloudflare SSR server — the FastAPI backend
 # serves the resulting .output/public directory as plain static files.

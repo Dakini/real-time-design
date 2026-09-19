@@ -37,6 +37,7 @@ def seed_demo_data(db: Session) -> None:
         password_hash=hash_password("linewarmer-demo"),
     )
     db.add(owner)
+    db.flush()  # owner.id must exist before sessions FK-reference it below
 
     sessions = [
         InterviewSession(
@@ -87,6 +88,7 @@ def seed_demo_data(db: Session) -> None:
     ]
     for s in sessions:
         db.add(SessionRow(**s.model_dump(mode="json"), cursor=0))
+    db.flush()  # session ids must exist before guest links / participants / elements FK-reference them below
 
     link = GuestLink(
         id="lnk_seed",

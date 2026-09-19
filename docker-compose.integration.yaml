@@ -1,0 +1,21 @@
+# Overlay applied on top of docker-compose.yaml by the integration suite
+# (`make test-integration`), never used on its own.
+#
+# It changes identity only — container names and the data volume — so the tests
+# still exercise the real image build, healthchecks, depends_on ordering and
+# DATABASE_URL wiring from docker-compose.yaml. Without it the suite's
+# `down -v` between runs would delete interview-canvas-pgdata, i.e. whatever
+# `make up` / `make postgres` has been holding onto locally.
+#
+# The published ports still come from docker-compose.yaml's defaults; the suite
+# sets PG_PORT to a non-default value so a dev database can stay up alongside.
+services:
+  db:
+    container_name: linewarmer-it-db
+
+  app:
+    container_name: linewarmer-it-app
+
+volumes:
+  pgdata:
+    name: linewarmer-it-pgdata

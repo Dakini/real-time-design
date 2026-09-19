@@ -29,7 +29,11 @@ outside `app/database.py` assumes SQLite — so pointing it at Postgres is just:
 DATABASE_URL="postgresql+psycopg://user:pass@host:5432/linewarmer" uv run uvicorn app.main:app --port 8091
 ```
 
-(after adding the relevant driver, e.g. `psycopg`, to `pyproject.toml`).
+`psycopg[binary]` is already a dependency, so no extra install step is needed. Note that
+SQLite doesn't enforce foreign keys by default while Postgres does — if you add new code that
+inserts a row and a row referencing it (via FK) in the same transaction, call `db.flush()`
+between the two so the parent row exists before the child is inserted (see `sign_in` and
+`join_with_token` in `service.py` for examples).
 
 ## Test
 

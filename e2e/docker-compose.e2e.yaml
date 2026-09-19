@@ -1,0 +1,17 @@
+# Overlay applied on top of ../docker-compose.yaml by the Playwright suite
+# (`npm test` in this directory), never used on its own.
+#
+# Mirrors ../docker-compose.integration.yaml: it changes identity only
+# (container names, data volume) so a stray `down -v` between runs can't touch
+# interview-canvas-pgdata, and this suite can run independently of the Python
+# integration suite (which uses its own linewarmer-it-* names).
+services:
+  db:
+    container_name: linewarmer-e2e-db
+
+  app:
+    container_name: linewarmer-e2e-app
+
+volumes:
+  pgdata:
+    name: linewarmer-e2e-pgdata

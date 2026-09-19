@@ -7,7 +7,7 @@ one-for-one, so a row converts to its API model with a single call:
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -106,5 +106,6 @@ class CanvasOperationRow(Base):
     clientOperationId: Mapped[str] = mapped_column(String)
     actorId: Mapped[str] = mapped_column(String)
     op: Mapped[dict] = mapped_column(JSON)
-    serverReceivedAt: Mapped[int] = mapped_column(Integer)
+    # Epoch milliseconds, which overflow a 32-bit INTEGER on Postgres.
+    serverReceivedAt: Mapped[int] = mapped_column(BigInteger)
     cursor: Mapped[int] = mapped_column(Integer)
