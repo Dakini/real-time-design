@@ -76,6 +76,7 @@ def sign_in(db: Session, email: str, password: str | None) -> tuple[User, str]:
                 password_hash=hash_password(password) if password else hash_password(secure_token()),
             )
             db.add(user)
+            db.flush()  # user.id must exist before the FK below is inserted
         elif password and not verify_password(password, user.password_hash):
             raise bad_request("Incorrect password.", code="invalid_credentials")
 
@@ -301,6 +302,7 @@ def join_with_token(db: Session, token: str, display_name: str) -> tuple[Intervi
             leftAt=None,
         )
         db.add(participant_row)
+        db.flush()  # participant_row.id must exist before the FK below is inserted
 
         raw_token = new_bearer_token()
         db.add(ParticipantTokenHashRow(tokenHash=hash_token(raw_token), participantId=participant_row.id))
