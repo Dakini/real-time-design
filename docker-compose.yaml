@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: interview-canvas-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdip}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdip}
+      POSTGRES_DB: ${POSTGRES_DB:-sdip}
+    ports:
+      # Published so host-side tooling (`make backend`, psql) can reach it at
+      # localhost:5432. The app container does not need this; it talks to `db`
+      # over the compose network.
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app calls create_all() on startup, so it must not boot before
+      # Postgres accepts connections. pg_isready without -h would probe the
+      # unix socket, which is up before the server finishes initialising.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-sdip} -d ${POSTGRES_DB:-sdip}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: interview-canvas-app
+    environment:
+      # The +psycopg suffix is required — a plain postgresql:// URL makes
+      # SQLAlchemy look for psycopg2, which isn't installed.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sdip}:${POSTGRES_PASSWORD:-sdip}@db:5432/${POSTGRES_DB:-sdip}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # python rather than curl: the backend image is python:3.13-slim, which
+      # ships neither curl nor wget.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    # Named explicitly (instead of the compose-prefixed default) so the data
+    # is shared with the `make postgres` container, which uses this volume.
+    name: interview-canvas-pgdata
