@@ -444,6 +444,18 @@ Outputs:
       HTTPS on CloudFront's own certificate, no domain required. Takes a few
       minutes to become available after the distribution is created.
     Value: !Sub https://${CloudFrontDistribution.DomainName}
+  PublicUrl:
+    Description: >-
+      Whichever URL is actually reachable from the internet right now - used
+      by CI to health-check a deploy. Priority: Caddy's own domain, then
+      CloudFront, then plain HTTP on the Elastic IP.
+    Value: !If
+      - HasDomain
+      - !Sub https://${DomainName}
+      - !If
+        - UseCloudFront
+        - !Sub https://${CloudFrontDistribution.DomainName}
+        - !Sub http://${ElasticIp}
   SsmConnectCommand:
     Value: !Sub aws ssm start-session --target ${AppInstance} --region ${AWS::Region}
   BootstrapLog:
@@ -462,8 +474,17 @@ Outputs:
   GitHubVariablesCommand:
     Condition: HasGitHubRepo
     Description: Run once to point the workflow at this stack.
-    Value: !Sub >-
-      gh variable set AWS_REGION --body ${AWS::Region} &&
-      gh variable set AWS_DEPLOY_ROLE_ARN --body ${GitHubDeployRole.Arn} &&
-      gh variable set DEPLOY_DOCUMENT --body ${DeployDocument} &&
-      gh variable set INSTANCE_ID --body ${AppInstance}
+    Value: !Sub
+      - >-
+        gh variable set AWS_REGION --body ${AWS::Region} &&
+        gh variable set AWS_DEPLOY_ROLE_ARN --body ${GitHubDeployRole.Arn} &&
+        gh variable set DEPLOY_DOCUMENT --body ${DeployDocument} &&
+        gh variable set INSTANCE_ID --body ${AppInstance} &&
+        gh variable set PUBLIC_URL --body ${ResolvedPublicUrl}
+      - ResolvedPublicUrl: !If
+          - HasDomain
+          - !Sub https://${DomainName}
+          - !If
+            - UseCloudFront
+            - !Sub https://${CloudFrontDistribution.DomainName}
+            - !Sub http://${ElasticIp}

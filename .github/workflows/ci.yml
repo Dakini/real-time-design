@@ -104,3 +104,17 @@ jobs:
               --query 'StandardErrorContent' --output text
             exit 1
           fi
+
+      - name: Verify the deploy is actually serving
+        run: |
+          url="${{ vars.PUBLIC_URL }}/healthz"
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" || echo "000")
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::$url never returned 200 after the deploy"
+          exit 1
