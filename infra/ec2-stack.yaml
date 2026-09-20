@@ -30,6 +30,8 @@ Metadata:
         Parameters:
           - EnableCloudFront
           - CloudFrontPrefixListId
+          - CloudFrontDomainName
+          - CloudFrontCertificateArn
       - Label:
           default: Continuous deployment (optional - leave GitHubRepository empty to deploy by hand)
         Parameters:
@@ -89,6 +91,24 @@ Parameters:
       default is eu-west-2. Find yours with: aws ec2
       describe-managed-prefix-lists --filters
       Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+  CloudFrontDomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Alternate domain name (CNAME) for the CloudFront
+      distribution, e.g. interview.dakini-labs.com. Requires an ACM
+      certificate for this exact name in us-east-1 (CloudFrontCertificateArn)
+      - CloudFront only accepts certificates from that region, regardless of
+      where this stack itself is deployed. Only used when EnableCloudFront is
+      true; leave empty to serve the free *.cloudfront.net domain instead.
+    AllowedPattern: ^$|^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$
+    ConstraintDescription: must be empty or a fully qualified domain name
+  CloudFrontCertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ACM certificate ARN covering CloudFrontDomainName, issued in us-east-1.
+      Required when CloudFrontDomainName is set.
   GitHubRepository:
     Type: String
     Default: Dakini/real-time-design
@@ -131,6 +151,9 @@ Conditions:
   UseCloudFront: !Equals [!Ref EnableCloudFront, 'true']
   DirectHttpAccess: !Not [!Equals [!Ref EnableCloudFront, 'true']]
   IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+  UseCloudFrontDomain: !And
+    - !Condition UseCloudFront
+    - !Not [!Equals [!Ref CloudFrontDomainName, '']]
   HasGitHubRepo: !Not [!Equals [!Ref GitHubRepository, '']]
   HasSubjectPrefix: !Not [!Equals [!Ref GitHubSubjectPrefix, '']]
   CreateOidcProvider: !And
@@ -218,9 +241,14 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           # -x deliberately omitted: this script writes a generated Postgres
-          # password to disk, and -x would copy it into the cloud-init log.
+          # password to disk, and -x would leak it into cloud-init's own log.
+          # No custom logging redirection here - cloud-init already captures
+          # this script's stdout/stderr to /var/log/cloud-init-output.log.
+          # An earlier version used `exec > >(tee -a ...) 2>&1` to also write
+          # a second, separate log file; under this environment that process
+          # substitution raced curl's own writes and caused spurious
+          # "curl: (23) Failure writing output to destination" mid-download.
           set -euo pipefail
-          exec > >(tee -a /var/log/linewarmer-bootstrap.log) 2>&1
 
           echo "=== swap ==="
           # The frontend/backend image build and Postgres both run on a 2GB
@@ -246,8 +274,12 @@ Resources:
           mkdir -p /usr/local/lib/docker/cli-plugins
           curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${!COMPOSE_ARCH}" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
-          BUILDX_VERSION=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
-            | grep -m1 '"tag_name"' | cut -d '"' -f4)
+          # Captured into a variable before grepping it, rather than piped
+          # straight into `grep -m1`: grep exits after its first match and
+          # closes the pipe while curl is still writing, and curl reports
+          # that SIGPIPE as "Failure writing output to destination".
+          BUILDX_RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest)
+          BUILDX_VERSION=$(printf '%s' "$BUILDX_RELEASE_JSON" | grep -m1 '"tag_name"' | cut -d '"' -f4)
           curl -fsSL "https://github.com/docker/buildx/releases/download/${!BUILDX_VERSION}/buildx-${!BUILDX_VERSION}.linux-${!BUILDX_ARCH}" \
             -o /usr/local/lib/docker/cli-plugins/docker-buildx
           chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-buildx
@@ -387,6 +419,7 @@ Resources:
       DistributionConfig:
         Enabled: true
         Comment: !Sub ${AWS::StackName} - Linewarmer
+        Aliases: !If [UseCloudFrontDomain, [!Ref CloudFrontDomainName], !Ref 'AWS::NoValue']
         PriceClass: PriceClass_100
         HttpVersion: http2and3
         Origins:
@@ -416,8 +449,12 @@ Resources:
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
           AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
           CachedMethods: [GET, HEAD]
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+        ViewerCertificate: !If
+          - UseCloudFrontDomain
+          - AcmCertificateArn: !Ref CloudFrontCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
 
   DomainRecord:
     Type: AWS::Route53::RecordSet
@@ -444,25 +481,33 @@ Outputs:
       HTTPS on CloudFront's own certificate, no domain required. Takes a few
       minutes to become available after the distribution is created.
     Value: !Sub https://${CloudFrontDistribution.DomainName}
+  CloudFrontDomainUrl:
+    Condition: UseCloudFrontDomain
+    Description: HTTPS on your own domain via CloudFront.
+    Value: !Sub https://${CloudFrontDomainName}
   PublicUrl:
     Description: >-
       Whichever URL is actually reachable from the internet right now - used
-      by CI to health-check a deploy. Priority: Caddy's own domain, then
-      CloudFront, then plain HTTP on the Elastic IP.
+      by CI to health-check a deploy. Priority: Caddy's own domain, then a
+      CloudFront custom domain, then the bare *.cloudfront.net domain, then
+      plain HTTP on the Elastic IP.
     Value: !If
       - HasDomain
       - !Sub https://${DomainName}
       - !If
-        - UseCloudFront
-        - !Sub https://${CloudFrontDistribution.DomainName}
-        - !Sub http://${ElasticIp}
+        - UseCloudFrontDomain
+        - !Sub https://${CloudFrontDomainName}
+        - !If
+          - UseCloudFront
+          - !Sub https://${CloudFrontDistribution.DomainName}
+          - !Sub http://${ElasticIp}
   SsmConnectCommand:
     Value: !Sub aws ssm start-session --target ${AppInstance} --region ${AWS::Region}
   BootstrapLog:
     Description: >-
       Read this first if the site isn't up yet - the stack reports success as
       soon as the instance launches, not when the app is actually serving.
-    Value: /var/log/linewarmer-bootstrap.log
+    Value: /var/log/cloud-init-output.log
   GitHubDeployRoleArn:
     Condition: HasGitHubRepo
     Description: Set as the AWS_DEPLOY_ROLE_ARN repository variable.
@@ -485,6 +530,9 @@ Outputs:
           - HasDomain
           - !Sub https://${DomainName}
           - !If
-            - UseCloudFront
-            - !Sub https://${CloudFrontDistribution.DomainName}
-            - !Sub http://${ElasticIp}
+            - UseCloudFrontDomain
+            - !Sub https://${CloudFrontDomainName}
+            - !If
+              - UseCloudFront
+              - !Sub https://${CloudFrontDistribution.DomainName}
+              - !Sub http://${ElasticIp}
