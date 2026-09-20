@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: backend
+      - run: uv run pytest
+        working-directory: backend
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+
+  integration-e2e:
+    needs: [backend-tests, frontend-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: e2e/package-lock.json
+
+      # Builds the compose stack (app + Postgres) and drives it over
+      # HTTP/WebSockets. Docker's layer cache carries over to the e2e
+      # build below, so that rebuild is fast.
+      - run: make test-integration
+
+      - run: make install-e2e
+      # Browser-driven flow against the same stack definition, built fresh
+      # under its own container names (e2e/docker-compose.e2e.yaml) so it
+      # can't collide with a stack a prior step left behind.
+      - run: make e2e
+
+      - name: Show stack logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yaml -p linewarmer-it logs --no-color || true
