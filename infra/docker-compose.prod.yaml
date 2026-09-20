@@ -1,0 +1,29 @@
+services:
+  app:
+    environment:
+      # Set true when a TLS-terminating frontend (Caddy or CloudFront) sits
+      # in front of this container, even though it receives plain HTTP.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: interview-canvas-caddy
+    environment:
+      # ":80" serves plain HTTP with no domain. Set SITE_ADDRESS to a real
+      # domain (e.g. "linewarmer.example.com") to have Caddy automatically
+      # provision and renew a Let's Encrypt certificate for it instead.
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

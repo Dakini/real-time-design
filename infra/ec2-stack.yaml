@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Linewarmer - single EC2 instance running the app + Postgres via the repo's
+  docker-compose.yaml, fronted by Caddy. Plain HTTP by default; set
+  DomainName to have Caddy provision Let's Encrypt TLS automatically.
+  Realtime session state is in-process, so this stack intentionally runs a
+  single instance rather than an ASG.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Networking
+        Parameters:
+          - VpcId
+          - SubnetId
+      - Label:
+          default: Instance
+        Parameters:
+          - InstanceType
+          - GitRepoUrl
+          - LatestAmiId
+      - Label:
+          default: Custom domain (optional - leave empty for plain http://<elastic-ip>)
+        Parameters:
+          - DomainName
+          - HostedZoneId
+      - Label:
+          default: CloudFront (optional - HTTPS on a free *.cloudfront.net domain, no domain needed)
+        Parameters:
+          - EnableCloudFront
+          - CloudFrontPrefixListId
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-08794875ef25acc4c
+    Description: Default VPC
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0849347d846fad5e5
+    Description: Default subnet (eu-west-2a)
+  InstanceType:
+    Type: String
+    Default: t3.small
+  GitRepoUrl:
+    Type: String
+    Default: https://github.com/Dakini/real-time-design.git
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  DomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. If set, Caddy requests a Let's Encrypt cert for this domain
+      instead of serving plain HTTP. Requires the domain's DNS to resolve to
+      the instance's Elastic IP (set HostedZoneId to have this stack create
+      that record for you, or point it yourself if the zone lives elsewhere).
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. Route 53 hosted zone ID to create an A record for DomainName
+      in. Leave empty if DomainName's DNS is managed outside Route 53, or if
+      DomainName is empty.
+  EnableCloudFront:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Put a CloudFront distribution in front of the instance and serve HTTPS
+      on its free *.cloudfront.net domain - the option to use when there's no
+      domain of your own. Port 80 then only accepts traffic from CloudFront,
+      not the public internet directly.
+  CloudFrontPrefixListId:
+    Type: String
+    Default: pl-93a247fa
+    Description: >-
+      The com.amazonaws.global.cloudfront.origin-facing managed prefix list,
+      used to restrict port 80 to CloudFront. This ID is REGION SPECIFIC; the
+      default is eu-west-2. Find yours with: aws ec2
+      describe-managed-prefix-lists --filters
+      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+
+Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+  HasHostedZone: !And
+    - !Condition HasDomain
+    - !Not [!Equals [!Ref HostedZoneId, '']]
+  UseCloudFront: !Equals [!Ref EnableCloudFront, 'true']
+  DirectHttpAccess: !Not [!Equals [!Ref EnableCloudFront, 'true']]
+  IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Linewarmer app - HTTP/HTTPS inbound only, no SSH
+      VpcId: !Ref VpcId
+      # Port 80 is granted below, conditionally: to the world when Caddy
+      # serves traffic directly, or to CloudFront only when it fronts the
+      # instance. 443 stays open for Caddy's own domain mode.
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+
+  HttpIngressPublic:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectHttpAccess
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      Description: HTTP, world-reachable (CloudFront disabled)
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  HttpIngressCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseCloudFront
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      Description: HTTP from CloudFront edge locations only
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: linewarmer-app
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # -x deliberately omitted: this script writes a generated Postgres
+          # password to disk, and -x would copy it into the cloud-init log.
+          set -euo pipefail
+          exec > >(tee -a /var/log/linewarmer-bootstrap.log) 2>&1
+
+          echo "=== swap ==="
+          # The frontend/backend image build and Postgres both run on a 2GB
+          # instance; without swap the npm/vite build step can OOM.
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+          echo "=== packages ==="
+          dnf install -y docker git
+          systemctl enable --now docker
+
+          echo "=== docker cli plugins ==="
+          # Amazon Linux 2023's docker package ships neither plugin, and
+          # `docker compose ... --build` refuses to build without buildx.
+          case "$(uname -m)" in
+            aarch64) COMPOSE_ARCH=aarch64; BUILDX_ARCH=arm64 ;;
+            x86_64)  COMPOSE_ARCH=x86_64;  BUILDX_ARCH=amd64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${!COMPOSE_ARCH}" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          BUILDX_VERSION=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
+            | grep -m1 '"tag_name"' | cut -d '"' -f4)
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${!BUILDX_VERSION}/buildx-${!BUILDX_VERSION}.linux-${!BUILDX_ARCH}" \
+            -o /usr/local/lib/docker/cli-plugins/docker-buildx
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-buildx
+
+          echo "=== source ==="
+          git clone ${GitRepoUrl} /opt/app
+          cd /opt/app
+
+          echo "=== environment ==="
+          # Never a stack parameter, so it never appears in the template, the
+          # stack events, or instance metadata - only on this instance's disk.
+          umask 077
+          echo "SITE_ADDRESS=${DomainName}" > .env
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
+          # Browsers only ever see HTTPS (via CloudFront or Caddy's own
+          # domain cert), even though the origin itself speaks plain HTTP.
+          if [ "${EnableCloudFront}" = "true" ] || [ -n "${DomainName}" ]; then
+            echo "COOKIE_SECURE=true" >> .env
+          fi
+
+          echo "=== build and start ==="
+          docker compose -f docker-compose.yaml -f infra/docker-compose.prod.yaml up -d --build
+
+          echo "=== bootstrap complete ==="
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppInstance
+
+  # Serves HTTPS on a free *.cloudfront.net domain - the only way to get a
+  # browser-trusted certificate without owning a domain. Not end-to-end
+  # encrypted: viewer-to-CloudFront is HTTPS, CloudFront-to-origin is plain
+  # HTTP, since the origin (Caddy in :80 mode) has no certificate of its own.
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} - Linewarmer
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        Origins:
+          # CloudFront rejects a bare IP as an origin, so address the instance
+          # by the public DNS name AWS derives from its Elastic IP.
+          - Id: instance
+            DomainName: !Sub
+              - ec2-${Dashed}.${Suffix}
+              - Dashed: !Join ['-', !Split ['.', !Ref ElasticIp]]
+                Suffix: !If
+                  - IsUsEast1
+                  - compute-1.amazonaws.com
+                  - !Sub ${AWS::Region}.compute.amazonaws.com
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: instance
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          # The app is dynamic and stateful, so nothing may be cached and
+          # every header/cookie/query string must reach the origin -
+          # including Upgrade and Sec-WebSocket-* for the realtime canvas.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [GET, HEAD]
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  DomainRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: HasHostedZone
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      TTL: '300'
+      ResourceRecords:
+        - !Ref ElasticIp
+
+Outputs:
+  PublicIp:
+    Value: !Ref ElasticIp
+  Url:
+    Value: !If
+      - HasDomain
+      - !Sub https://${DomainName}
+      - !Sub http://${ElasticIp}
+  CloudFrontUrl:
+    Condition: UseCloudFront
+    Description: >-
+      HTTPS on CloudFront's own certificate, no domain required. Takes a few
+      minutes to become available after the distribution is created.
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+  SsmConnectCommand:
+    Value: !Sub aws ssm start-session --target ${AppInstance} --region ${AWS::Region}
+  BootstrapLog:
+    Description: >-
+      Read this first if the site isn't up yet - the stack reports success as
+      soon as the instance launches, not when the app is actually serving.
+    Value: /var/log/linewarmer-bootstrap.log
