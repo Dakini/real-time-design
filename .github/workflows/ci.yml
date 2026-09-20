@@ -60,3 +60,47 @@ jobs:
       - name: Show stack logs on failure
         if: failure()
         run: docker compose -f docker-compose.yaml -p linewarmer-it logs --no-color || true
+
+  deploy:
+    needs: [integration-e2e]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy via Systems Manager
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "${{ vars.INSTANCE_ID }}" \
+            --document-name "${{ vars.DEPLOY_DOCUMENT }}" \
+            --parameters commit=${{ github.sha }} \
+            --query 'Command.CommandId' --output text)
+
+          aws ssm wait command-executed \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" || true
+
+          status=$(aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query 'Status' --output text)
+
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query 'StandardOutputContent' --output text
+
+          if [ "$status" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$command_id" \
+              --instance-id "${{ vars.INSTANCE_ID }}" \
+              --query 'StandardErrorContent' --output text
+            exit 1
+          fi

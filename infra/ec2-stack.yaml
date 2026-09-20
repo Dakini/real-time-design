@@ -30,6 +30,13 @@ Metadata:
         Parameters:
           - EnableCloudFront
           - CloudFrontPrefixListId
+      - Label:
+          default: Continuous deployment (optional - leave GitHubRepository empty to deploy by hand)
+        Parameters:
+          - GitHubRepository
+          - GitHubEnvironment
+          - GitHubSubjectPrefix
+          - CreateGitHubOidcProvider
 
 Parameters:
   VpcId:
@@ -82,6 +89,39 @@ Parameters:
       default is eu-west-2. Find yours with: aws ec2
       describe-managed-prefix-lists --filters
       Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
+  GitHubRepository:
+    Type: String
+    Default: Dakini/real-time-design
+    Description: >-
+      owner/repo allowed to deploy to this instance from GitHub Actions.
+      Leave empty to create no deploy role at all and keep shipping by hand.
+    AllowedPattern: ^$|^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$
+    ConstraintDescription: must be empty or owner/repo
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    Description: >-
+      The GitHub environment the deploy job runs in. Must match the
+      workflow's `environment:` exactly: the OIDC token's subject claim
+      names the environment, not the branch, whenever a job declares one.
+    MinLength: 1
+  GitHubSubjectPrefix:
+    Type: String
+    Default: ''
+    Description: >-
+      Overrides the "repo:owner/repo" prefix of the OIDC subject claim. Some
+      repositories mint subjects carrying numeric IDs instead
+      (repo:owner@875246/repo@1321814459). Read yours with `gh api
+      repos/OWNER/REPO/actions/oidc/customization/sub` and paste
+      sub_claim_prefix here when it isn't the plain owner/repo form.
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      The GitHub OIDC provider is account-wide, so exactly one stack may own
+      it. Set false if this account already has one - the role then trusts
+      the existing provider instead of failing with EntityAlreadyExists.
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, '']]
@@ -91,6 +131,11 @@ Conditions:
   UseCloudFront: !Equals [!Ref EnableCloudFront, 'true']
   DirectHttpAccess: !Not [!Equals [!Ref EnableCloudFront, 'true']]
   IsUsEast1: !Equals [!Ref 'AWS::Region', us-east-1]
+  HasGitHubRepo: !Not [!Equals [!Ref GitHubRepository, '']]
+  HasSubjectPrefix: !Not [!Equals [!Ref GitHubSubjectPrefix, '']]
+  CreateOidcProvider: !And
+    - !Condition HasGitHubRepo
+    - !Equals [!Ref CreateGitHubOidcProvider, 'true']
 
 Resources:
   InstanceSecurityGroup:
@@ -228,6 +273,103 @@ Resources:
 
           echo "=== bootstrap complete ==="
 
+  # The deployment procedure lives here, in the template, rather than in the
+  # workflow that triggers it. That's what keeps the CI role harmless: it may
+  # run this document and nothing else, so the worst a stolen GitHub token
+  # can do is redeploy some commit of this repository. Granting SendCommand
+  # on AWS-RunShellScript instead would hand out root on the instance.
+  DeployDocument:
+    Type: AWS::SSM::Document
+    Condition: HasGitHubRepo
+    Properties:
+      Name: !Sub ${AWS::StackName}-deploy
+      DocumentType: Command
+      DocumentFormat: YAML
+      TargetType: /AWS::EC2::Instance
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: Roll the checkout in /opt/app forward to a commit and rebuild.
+        parameters:
+          commit:
+            type: String
+            description: Commit SHA to deploy.
+            # SSM rejects a parameter that doesn't match, so the only value
+            # the workflow injects into the script can't carry shell syntax.
+            allowedPattern: ^[0-9a-fA-F]{7,40}$
+        mainSteps:
+          - action: aws:runShellScript
+            name: deploy
+            inputs:
+              timeoutSeconds: '1800'
+              runCommand:
+                - set -euo pipefail
+                - cd /opt/app
+                - git fetch --all --prune
+                - git checkout --detach '{{ commit }}'
+                - docker compose -f docker-compose.yaml -f infra/docker-compose.prod.yaml up -d --build
+                - docker image prune -f
+
+  # Account-wide, so only one stack in the account may create it.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        # IAM no longer validates against this for the GitHub provider, but
+        # the API still requires a well-formed value.
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Condition: HasGitHubRepo
+    Properties:
+      Description: !Sub Lets ${GitHubRepository} redeploy ${AWS::StackName} through Systems Manager.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                # Both claims matter: without the audience check, any GitHub
+                # workflow anywhere could present a token; without the exact
+                # subject, any repository could. Pinning to one repo AND one
+                # environment means a PR from a fork - which can't reach a
+                # protected environment - can't assume this role even from a
+                # branch of this repository.
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !If
+                  - HasSubjectPrefix
+                  - !Sub ${GitHubSubjectPrefix}:environment:${GitHubEnvironment}
+                  - !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: RunTheDeployDocumentOnThisInstance
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/${AppInstance}
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeployDocument}
+              # Read-only, and the one call the workflow makes to learn
+              # whether the deploy succeeded. SSM defines no resource type
+              # for it, so "*" is the narrowest form IAM accepts.
+              - Sid: ReadBackTheCommandResult
+                Effect: Allow
+                Action: ssm:GetCommandInvocation
+                Resource: '*'
+
   ElasticIp:
     Type: AWS::EC2::EIP
     Properties:
@@ -309,3 +451,19 @@ Outputs:
       Read this first if the site isn't up yet - the stack reports success as
       soon as the instance launches, not when the app is actually serving.
     Value: /var/log/linewarmer-bootstrap.log
+  GitHubDeployRoleArn:
+    Condition: HasGitHubRepo
+    Description: Set as the AWS_DEPLOY_ROLE_ARN repository variable.
+    Value: !GetAtt GitHubDeployRole.Arn
+  GitHubDeployDocument:
+    Condition: HasGitHubRepo
+    Description: Set as the DEPLOY_DOCUMENT repository variable.
+    Value: !Ref DeployDocument
+  GitHubVariablesCommand:
+    Condition: HasGitHubRepo
+    Description: Run once to point the workflow at this stack.
+    Value: !Sub >-
+      gh variable set AWS_REGION --body ${AWS::Region} &&
+      gh variable set AWS_DEPLOY_ROLE_ARN --body ${GitHubDeployRole.Arn} &&
+      gh variable set DEPLOY_DOCUMENT --body ${DeployDocument} &&
+      gh variable set INSTANCE_ID --body ${AppInstance}
