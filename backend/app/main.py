@@ -18,13 +18,17 @@ from .routers import auth, canvas, guest_links, participants, realtime, sessions
 from .seed import seed_demo_data
 
 
+_SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "true").lower() == "true"
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
-    with SessionLocal() as db:
-        if db.query(UserRow).first() is None:
-            seed_demo_data(db)
-            db.commit()
+    if _SEED_DEMO_DATA:
+        with SessionLocal() as db:
+            if db.query(UserRow).first() is None:
+                seed_demo_data(db)
+                db.commit()
     yield
 
 

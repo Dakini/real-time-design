@@ -4,6 +4,10 @@ services:
       # Set true when a TLS-terminating frontend (Caddy or CloudFront) sits
       # in front of this container, even though it receives plain HTTP.
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # The demo owner account (jordan@linewarmer.io) and its password are
+      # public in this repo's source, so auto-seeding it here would hand out
+      # a known login on every real deployment.
+      SEED_DEMO_DATA: "false"
 
   caddy:
     image: caddy:2-alpine

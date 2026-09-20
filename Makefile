@@ -103,7 +103,7 @@ postgres:
 			-e POSTGRES_USER=$(PG_USER) \
 			-e POSTGRES_PASSWORD=$(PG_PASSWORD) \
 			-e POSTGRES_DB=$(PG_DB) \
-			-p $(PG_PORT):5432 \
+			-p 127.0.0.1:$(PG_PORT):5432 \
 			-v $(PG_VOLUME):/var/lib/postgresql/data \
 			$(PG_IMAGE); \
 	fi

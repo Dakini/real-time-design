@@ -9,8 +9,9 @@ services:
     ports:
       # Published so host-side tooling (`make backend`, psql) can reach it at
       # localhost:5432. The app container does not need this; it talks to `db`
-      # over the compose network.
-      - "${PG_PORT:-5432}:5432"
+      # over the compose network. Bound to loopback only, so a host with no
+      # firewall (e.g. the EC2 deploy) never exposes Postgres to the internet.
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

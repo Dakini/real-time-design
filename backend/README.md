@@ -4,7 +4,10 @@ FastAPI implementation of `../openapi.yaml` — the contract
 `frontend/src/services/api.ts` expects. Persisted via SQLAlchemy, seeded on
 first run with the same demo data as the frontend mock
 (`frontend/src/services/mock/store.ts`), so the app has something to show
-without any setup.
+without any setup. The seeded demo owner (`jordan@linewarmer.io`) has a
+password that's public in this repo's source, so set `SEED_DEMO_DATA=false`
+in any real deployment (already done for the prod compose overlay,
+`infra/docker-compose.prod.yaml`).
 
 ## Run
 
