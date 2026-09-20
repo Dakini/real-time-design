@@ -57,9 +57,15 @@ def _compose_env() -> dict[str, str]:
 
 def compose(*args: str, timeout: int = 120, check: bool = True) -> subprocess.CompletedProcess[str]:
     cmd = ["docker", "compose", "-f", str(COMPOSE_FILE), "-f", str(OVERLAY_FILE), "-p", PROJECT, *args]
-    return subprocess.run(
-        cmd, cwd=REPO_ROOT, env=_compose_env(), capture_output=True, text=True, check=check, timeout=timeout
-    )
+    result = subprocess.run(cmd, cwd=REPO_ROOT, env=_compose_env(), capture_output=True, text=True, timeout=timeout)
+    if check and result.returncode != 0:
+        # capture_output hides stdout/stderr from CI logs by default; surface it
+        # here so a build/healthcheck failure is diagnosable instead of just a
+        # bare "returned non-zero exit status" from CalledProcessError.
+        print(result.stdout)
+        print(result.stderr)
+        result.check_returncode()
+    return result
 
 
 def compose_up() -> None:
