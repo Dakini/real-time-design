@@ -1,0 +1,52 @@
+# No contact point/notification policy is provisioned here - Grafana's
+# built-in default ("grafana-default-email") needs SMTP credentials this repo
+# doesn't have configured, so a firing alert shows up under Alerting > Fire
+# state but won't actually notify anyone until a real contact point (email,
+# Slack webhook, etc.) is added.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: linewarmer-alerts
+    folder: Linewarmer
+    interval: 1m
+    rules:
+      - uid: linewarmer-5xx-error-rate
+        title: "Linewarmer: 5xx error rate"
+        # One alert instance per deployment_environment - dev and prod alert
+        # independently since the query is grouped by that label.
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum by (deployment_environment) (rate(http_server_duration_milliseconds_count{http_status_code=~"5.."}[5m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: "5xx responses for {{ $labels.deployment_environment }} sustained above 0 req/s for 5m"
+        labels:
+          severity: critical
+          service: linewarmer-backend

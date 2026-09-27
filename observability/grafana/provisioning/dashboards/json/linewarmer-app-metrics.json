@@ -3,7 +3,7 @@
   "title": "Linewarmer - Application Metrics",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
   "templating": {
@@ -181,6 +181,51 @@
           "refId": "A",
           "expr": "sum(canvas_component_creation_failures_total{deployment_environment=~\"$environment\", service_version=~\"$version\"})",
           "legendFormat": "creation failures"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "HTTP 5xx Responses (total)",
+      "description": "Cumulative count of server-error HTTP responses, for the selected environment/version. Backs the '5xx error rate' alert.",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [{ "value": null, "color": "green" }, { "value": 1, "color": "red" }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(http_server_duration_milliseconds_count{http_status_code=~\"5..\", deployment_environment=~\"$environment\", service_version=~\"$version\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "HTTP 5xx Error Rate",
+      "description": "Server-error responses per second, by environment. The 'Linewarmer: 5xx error rate' alert fires when this stays above 0 for 5 minutes.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "fixed", "fixedColor": "red" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "showLegend": true, "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (deployment_environment) (rate(http_server_duration_milliseconds_count{http_status_code=~\"5..\", deployment_environment=~\"$environment\", service_version=~\"$version\"}[5m]))",
+          "legendFormat": "{{deployment_environment}}"
         }
       ]
     }

@@ -22,3 +22,12 @@ Tempo, logs out to Loki, and exposes metrics for Prometheus to scrape (see
 
 Without `OTEL_EXPORTER_OTLP_ENDPOINT` set, this stack is entirely optional -
 the app runs fine without it.
+
+## Alerting
+
+`grafana/provisioning/alerting/rules.yaml` provisions one alert, "Linewarmer:
+5xx error rate" (one instance per `deployment_environment`), firing when a
+5xx response rate stays above 0 req/s for 5 minutes. No contact point is
+provisioned alongside it - Grafana's default one needs SMTP credentials this
+repo doesn't have, so a firing alert is visible under Alerting but notifies
+no one until a real contact point (email, Slack webhook, etc.) is added.
