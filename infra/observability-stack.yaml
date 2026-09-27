@@ -23,6 +23,10 @@ Metadata:
           - GitRepoUrl
           - LatestAmiId
       - Label:
+          default: Custom domain for Grafana (optional - leave empty for plain http://<elastic-ip>)
+        Parameters:
+          - DomainName
+      - Label:
           default: App instances allowed to send telemetry here
         Parameters:
           - DevAppSecurityGroupId
@@ -46,6 +50,15 @@ Parameters:
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  DomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      Optional. If set, Caddy requests a Let's Encrypt cert for this domain
+      instead of serving plain HTTP on the Elastic IP. DNS for
+      dakini-labs.com is managed in Cloudflare, not Route 53 - point an A
+      record at this stack's PublicIp output yourself, there's no
+      HostedZoneId parameter here like ec2-stack.yaml's.
   DevAppSecurityGroupId:
     Type: String
     Default: sg-05271d6ff589dbf24
@@ -60,6 +73,7 @@ Parameters:
       AppSecurityGroupId output). Leave empty to not grant it access.
 
 Conditions:
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
   HasDevSecurityGroup: !Not [!Equals [!Ref DevAppSecurityGroupId, '']]
   HasProdSecurityGroup: !Not [!Equals [!Ref ProdAppSecurityGroupId, '']]
 
@@ -67,17 +81,22 @@ Resources:
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Observability stack - Grafana public, OTLP restricted to app instances
+      GroupDescription: Observability stack - Grafana public via Caddy, OTLP restricted to app instances
       VpcId: !Ref VpcId
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 3000
-          ToPort: 3000
+          FromPort: 80
+          ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: Grafana (anonymous Viewer access, no auth stood up yet)
+          Description: Caddy -> Grafana (anonymous Viewer access, no auth stood up yet)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Caddy -> Grafana, TLS (only used once DomainName is set)
 
   # OTLP ingress is granted per-source-security-group rather than folded into
   # InstanceSecurityGroup's own ingress list, so each app stack can be
@@ -191,10 +210,15 @@ Resources:
           git clone ${GitRepoUrl} /opt/app
           cd /opt/app
 
+          echo "=== environment ==="
+          umask 077
+          echo "SITE_ADDRESS=${DomainName}" > observability/.env
+
           echo "=== pull and start ==="
           # Every image here is public (Docker Hub), unlike ec2-stack.yaml's
           # app image - no registry login needed.
-          docker compose -f observability/docker-compose.yaml up -d --pull always
+          docker compose -f observability/docker-compose.yaml -f infra/docker-compose.observability-prod.yaml \
+            --env-file observability/.env up -d --pull always
 
           echo "=== bootstrap complete ==="
 
@@ -207,7 +231,10 @@ Resources:
 Outputs:
   GrafanaUrl:
     Description: Anonymous Viewer access, no auth in front of this yet.
-    Value: !Sub http://${ElasticIp}:3000
+    Value: !If
+      - HasDomain
+      - !Sub https://${DomainName}
+      - !Sub http://${ElasticIp}
   CollectorEndpoint:
     Description: >-
       Set as ObservabilityCollectorEndpoint on the linewarmer-dev and

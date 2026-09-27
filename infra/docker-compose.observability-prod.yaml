@@ -1,0 +1,29 @@
+services:
+  # Caddy fronts Grafana instead of publishing :3000 directly, same reasoning
+  # as infra/docker-compose.prod.yaml for the app: plain HTTP by default,
+  # automatic Let's Encrypt TLS once SITE_ADDRESS is a real domain.
+  grafana:
+    ports: []
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: observability-caddy
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Resolved relative to observability/docker-compose.yaml - the base
+      # file in the -f list, which is what Compose anchors relative paths to
+      # when merging multiple files.
+      - ../infra/Caddyfile.observability:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - grafana
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
