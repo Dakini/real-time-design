@@ -3,7 +3,10 @@ services:
   # as infra/docker-compose.prod.yaml for the app: plain HTTP by default,
   # automatic Let's Encrypt TLS once SITE_ADDRESS is a real domain.
   grafana:
-    ports: []
+    # Compose merges array fields across -f files by default (concatenates,
+    # doesn't replace) - !reset is required to actually clear the base
+    # file's "3000:3000" mapping instead of just adding nothing to it.
+    ports: !reset []
 
   caddy:
     image: caddy:2-alpine
