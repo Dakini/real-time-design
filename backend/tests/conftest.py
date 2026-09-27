@@ -4,6 +4,9 @@ import os
 # it at import time to build the engine. An in-memory DB keeps tests isolated
 # from whatever DATABASE_URL is configured for local dev.
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+# Avoids BatchSpanProcessor's background export thread outliving the test
+# process and writing to stdout after pytest has closed it.
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 import pytest
 from fastapi.testclient import TestClient

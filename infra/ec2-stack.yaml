@@ -298,6 +298,9 @@ Resources:
           umask 077
           echo "SITE_ADDRESS=${DomainName}" > .env
           echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> .env
+          # Tags every trace/metric/log this instance emits with which stack
+          # it is (dev vs prod) - see backend/app/telemetry.py.
+          echo "ENVIRONMENT=${GitHubEnvironment}" >> .env
           # Browsers only ever see HTTPS (via CloudFront or Caddy's own
           # domain cert), even though the origin itself speaks plain HTTP.
           if [ "${EnableCloudFront}" = "true" ] || [ -n "${DomainName}" ]; then
@@ -313,6 +316,7 @@ Resources:
           # below), so it can be recomputed here from HEAD alone rather than
           # passed in as a parameter.
           TAG=$(date -u -d @$(git show -s --format=%ct HEAD) +%Y%m%d-%H%M%S)-$(git rev-parse --short=7 HEAD)
+          APP_VERSION=$TAG \
           APP_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/linewarmer:$TAG \
             docker compose -f docker-compose.yaml -f infra/docker-compose.prod.yaml -f infra/docker-compose.ecr.yaml up -d --pull always
 
@@ -359,7 +363,7 @@ Resources:
                 - git checkout --detach '{{ commit }}'
                 - TAG=$(date -u -d @$(git show -s --format=%ct HEAD) +%Y%m%d-%H%M%S)-$(git rev-parse --short=7 HEAD)
                 - !Sub aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
-                - !Sub APP_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/linewarmer:$TAG docker compose -f docker-compose.yaml -f infra/docker-compose.prod.yaml -f infra/docker-compose.ecr.yaml up -d --pull always
+                - !Sub APP_VERSION=$TAG APP_IMAGE=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/linewarmer:$TAG docker compose -f docker-compose.yaml -f infra/docker-compose.prod.yaml -f infra/docker-compose.ecr.yaml up -d --pull always
                 - docker image prune -f
 
   # Account-wide, so only one stack in the account may create it.

@@ -8,6 +8,11 @@ services:
       # public in this repo's source, so auto-seeding it here would hand out
       # a known login on every real deployment.
       SEED_DEMO_DATA: "false"
+      # Set by the deploy script/document (infra/ec2-stack.yaml) from .env and
+      # the same TAG it uses for APP_IMAGE, so OpenTelemetry spans carry which
+      # stack and which build are actually running.
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      APP_VERSION: ${APP_VERSION:-unknown}
 
   caddy:
     image: caddy:2-alpine

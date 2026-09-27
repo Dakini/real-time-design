@@ -11,11 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .database import SessionLocal, init_db
+from .database import SessionLocal, engine, init_db
 from .db_models import UserRow
 from .errors import AppError
 from .routers import auth, canvas, guest_links, participants, realtime, sessions
 from .seed import seed_demo_data
+from .telemetry import setup_telemetry
 
 
 _SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "true").lower() == "true"
@@ -38,6 +39,8 @@ app = FastAPI(
     summary="The backend contract expected by the Linewarmer frontend.",
     lifespan=_lifespan,
 )
+
+setup_telemetry(app, engine)
 
 _default_origins = (
     "http://localhost:5173,http://localhost:3000,http://localhost:8080,"
