@@ -91,12 +91,12 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: Caddy -> Grafana (anonymous Viewer access, no auth stood up yet)
+          Description: Caddy to Grafana (anonymous Viewer access, no auth stood up yet)
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: Caddy -> Grafana, TLS (only used once DomainName is set)
+          Description: Caddy to Grafana, TLS (only used once DomainName is set)
 
   # OTLP ingress is granted per-source-security-group rather than folded into
   # InstanceSecurityGroup's own ingress list, so each app stack can be
