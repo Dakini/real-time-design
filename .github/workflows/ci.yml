@@ -61,10 +61,14 @@ jobs:
         if: failure()
         run: docker compose -f docker-compose.yaml -p linewarmer-it logs --no-color || true
 
-  # Built once per commit on main and pushed to ECR by tag=<sha>. deploy-dev
-  # and promote.yml both just tell an instance which tag to pull, so dev and
-  # a later production promotion always run the exact same image bytes
-  # rather than each rebuilding from source.
+  # Built once per commit on main and pushed to ECR tagged
+  # YYYYMMDD-HHMMSS-shortsha, derived from the commit's own timestamp so any
+  # machine (this job, the deploy instance, a later promotion) can recompute
+  # the exact same tag from a commit sha alone - no need to pass the tag
+  # around separately. deploy-dev and promote.yml both just tell the instance
+  # which commit to pull the image for, so dev and a later production
+  # promotion always run the exact same image bytes rather than each
+  # rebuilding from source.
   build-and-push:
     needs: [integration-e2e]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -84,8 +88,9 @@ jobs:
 
       - name: Build and push
         run: |
-          docker build -t "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}" .
-          docker push "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}"
+          tag="$(date -u -d @$(git show -s --format=%ct HEAD) +%Y%m%d-%H%M%S)-$(git rev-parse --short=7 HEAD)"
+          docker build -t "${{ vars.ECR_REPOSITORY_URI }}:$tag" .
+          docker push "${{ vars.ECR_REPOSITORY_URI }}:$tag"
 
   deploy-dev:
     needs: [build-and-push]
