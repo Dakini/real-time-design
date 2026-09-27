@@ -61,8 +61,34 @@ jobs:
         if: failure()
         run: docker compose -f docker-compose.yaml -p linewarmer-it logs --no-color || true
 
-  deploy-dev:
+  # Built once per commit on main and pushed to ECR by tag=<sha>. deploy-dev
+  # and promote.yml both just tell an instance which tag to pull, so dev and
+  # a later production promotion always run the exact same image bytes
+  # rather than each rebuilding from source.
+  build-and-push:
     needs: [integration-e2e]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        run: |
+          docker build -t "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}" .
+          docker push "${{ vars.ECR_REPOSITORY_URI }}:${{ github.sha }}"
+
+  deploy-dev:
+    needs: [build-and-push]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: development

@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Shared ECR repository for the linewarmer app image, plus the GitHub OIDC
+  role CI uses to build once per commit on main and push it here. Both the
+  dev and prod EC2 stacks pull the same image by commit-sha tag rather than
+  each rebuilding from source.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: linewarmer
+  GitHubRepository:
+    Type: String
+    Default: Dakini/real-time-design
+    AllowedPattern: ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$
+    ConstraintDescription: must be owner/repo
+  BranchName:
+    Type: String
+    Default: main
+    Description: Only workflow runs building this branch may push images.
+  GitHubSubjectPrefix:
+    Type: String
+    Default: ''
+    Description: >-
+      Overrides the "repo:owner/repo" prefix of the OIDC subject claim. See
+      ec2-stack.yaml's parameter of the same name for how to find yours.
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      The GitHub OIDC provider is account-wide. Leave false if another stack
+      in this account (e.g. one of the ec2-stack.yaml deployments) already
+      created it.
+
+Conditions:
+  HasSubjectPrefix: !Not [!Equals [!Ref GitHubSubjectPrefix, '']]
+  CreateOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, 'true']
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only the most recent 50 tagged images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 50
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubEcrPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub Lets ${GitHubRepository} push images built from ${BranchName} to ${RepositoryName}.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !If
+                  - HasSubjectPrefix
+                  - !Sub ${GitHubSubjectPrefix}:ref:refs/heads/${BranchName}
+                  - !Sub repo:${GitHubRepository}:ref:refs/heads/${BranchName}
+      Policies:
+        - PolicyName: push-image
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AuthToken
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: PushAndPull
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !GetAtt Repository.Arn
+
+Outputs:
+  RepositoryUri:
+    Description: Set as the ECR_REPOSITORY_URI repository variable.
+    Value: !GetAtt Repository.RepositoryUri
+  RepositoryArn:
+    Value: !GetAtt Repository.Arn
+  GitHubEcrPushRoleArn:
+    Description: Set as the ECR_PUSH_ROLE_ARN repository variable.
+    Value: !GetAtt GitHubEcrPushRole.Arn
