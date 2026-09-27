@@ -1,0 +1,75 @@
+name: Promote development to production
+
+# Deploys whatever commit is currently confirmed live on development
+# (tracked by the deployed-dev tag, updated by the CI workflow's deploy-dev
+# job) to production. Manual only - trigger via "Run workflow" in the
+# Actions tab. Add required reviewers on the production environment
+# (Settings > Environments) for an approval step on top of this.
+on:
+  workflow_dispatch:
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: deployed-dev
+          fetch-depth: 1
+
+      - name: Resolve the commit currently deployed to development
+        id: resolve
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Deploy via Systems Manager
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "${{ vars.INSTANCE_ID }}" \
+            --document-name "${{ vars.DEPLOY_DOCUMENT }}" \
+            --parameters commit=${{ steps.resolve.outputs.sha }} \
+            --query 'Command.CommandId' --output text)
+
+          aws ssm wait command-executed \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" || true
+
+          status=$(aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query 'Status' --output text)
+
+          aws ssm get-command-invocation \
+            --command-id "$command_id" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query 'StandardOutputContent' --output text
+
+          if [ "$status" != "Success" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$command_id" \
+              --instance-id "${{ vars.INSTANCE_ID }}" \
+              --query 'StandardErrorContent' --output text
+            exit 1
+          fi
+
+      - name: Verify the deploy is actually serving
+        run: |
+          url="${{ vars.PUBLIC_URL }}/healthz"
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" || echo "000")
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 6
+          done
+          echo "::error::$url never returned 200 after the deploy"
+          exit 1

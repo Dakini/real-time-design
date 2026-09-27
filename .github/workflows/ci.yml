@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 jobs:
   backend-tests:
@@ -69,8 +68,10 @@ jobs:
     environment: development
     permissions:
       id-token: write
-      contents: read
+      contents: write
     steps:
+      - uses: actions/checkout@v5
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
@@ -120,63 +121,11 @@ jobs:
           echo "::error::$url never returned 200 after the deploy"
           exit 1
 
-  # Manual only: this repo currently only auto-deploys to development on
-  # push to main. Run this via "Run workflow" in the Actions tab when
-  # production should pick up a given commit.
-  deploy-prod:
-    needs: [integration-e2e]
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Deploy via Systems Manager
+      # Marks the commit that is actually confirmed live on development, for
+      # promote.yml to read back and deploy as-is to production - so
+      # promotion always ships exactly what's running on dev, never whatever
+      # happens to be at the tip of main when someone clicks the button.
+      - name: Mark this commit as the current development deployment
         run: |
-          command_id=$(aws ssm send-command \
-            --instance-ids "${{ vars.INSTANCE_ID }}" \
-            --document-name "${{ vars.DEPLOY_DOCUMENT }}" \
-            --parameters commit=${{ github.sha }} \
-            --query 'Command.CommandId' --output text)
-
-          aws ssm wait command-executed \
-            --command-id "$command_id" \
-            --instance-id "${{ vars.INSTANCE_ID }}" || true
-
-          status=$(aws ssm get-command-invocation \
-            --command-id "$command_id" \
-            --instance-id "${{ vars.INSTANCE_ID }}" \
-            --query 'Status' --output text)
-
-          aws ssm get-command-invocation \
-            --command-id "$command_id" \
-            --instance-id "${{ vars.INSTANCE_ID }}" \
-            --query 'StandardOutputContent' --output text
-
-          if [ "$status" != "Success" ]; then
-            aws ssm get-command-invocation \
-              --command-id "$command_id" \
-              --instance-id "${{ vars.INSTANCE_ID }}" \
-              --query 'StandardErrorContent' --output text
-            exit 1
-          fi
-
-      - name: Verify the deploy is actually serving
-        run: |
-          url="${{ vars.PUBLIC_URL }}/healthz"
-          for i in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" || echo "000")
-            echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ]; then
-              exit 0
-            fi
-            sleep 6
-          done
-          echo "::error::$url never returned 200 after the deploy"
-          exit 1
+          git tag -f deployed-dev
+          git push origin -f deployed-dev
