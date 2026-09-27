@@ -39,6 +39,10 @@ Metadata:
           - GitHubEnvironment
           - GitHubSubjectPrefix
           - CreateGitHubOidcProvider
+      - Label:
+          default: Observability (optional - leave empty to print telemetry to container logs only)
+        Parameters:
+          - ObservabilityCollectorEndpoint
 
 Parameters:
   VpcId:
@@ -142,6 +146,14 @@ Parameters:
       The GitHub OIDC provider is account-wide, so exactly one stack may own
       it. Set false if this account already has one - the role then trusts
       the existing provider instead of failing with EntityAlreadyExists.
+  ObservabilityCollectorEndpoint:
+    Type: String
+    Default: ''
+    Description: >-
+      OTLP/HTTP endpoint of the shared observability stack's collector (see
+      infra/observability-stack.yaml's CollectorEndpoint output), e.g.
+      http://172.31.x.x:4318. Leave empty to have the app print telemetry to
+      container logs instead (see backend/app/telemetry.py).
 
 Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, '']]
@@ -301,6 +313,9 @@ Resources:
           # Tags every trace/metric/log this instance emits with which stack
           # it is (dev vs prod) - see backend/app/telemetry.py.
           echo "ENVIRONMENT=${GitHubEnvironment}" >> .env
+          # Empty is fine: telemetry.py treats an empty string as unset and
+          # falls back to printing to container logs.
+          echo "OTEL_EXPORTER_OTLP_ENDPOINT=${ObservabilityCollectorEndpoint}" >> .env
           # Browsers only ever see HTTPS (via CloudFront or Caddy's own
           # domain cert), even though the origin itself speaks plain HTTP.
           if [ "${EnableCloudFront}" = "true" ] || [ -n "${DomainName}" ]; then
@@ -494,6 +509,12 @@ Resources:
 Outputs:
   PublicIp:
     Value: !Ref ElasticIp
+  AppSecurityGroupId:
+    Description: >-
+      Set as DevAppSecurityGroupId/ProdAppSecurityGroupId on
+      infra/observability-stack.yaml to let this instance send telemetry to
+      the shared observability stack.
+    Value: !Ref InstanceSecurityGroup
   Url:
     Value: !If
       - HasDomain

@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Linewarmer - shared observability stack (OTel Collector, Prometheus, Loki,
+  Tempo, Grafana) on a single EC2 instance, separate from the app stacks. Both
+  linewarmer-dev and linewarmer-prod send telemetry here; Grafana tells them
+  apart via the environment label already attached in
+  backend/app/telemetry.py. Deliberately separate from ec2-stack.yaml: this
+  instance is shared infrastructure, not part of either app environment's
+  lifecycle.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Networking
+        Parameters:
+          - VpcId
+          - SubnetId
+      - Label:
+          default: Instance
+        Parameters:
+          - InstanceType
+          - GitRepoUrl
+          - LatestAmiId
+      - Label:
+          default: App instances allowed to send telemetry here
+        Parameters:
+          - DevAppSecurityGroupId
+          - ProdAppSecurityGroupId
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-08794875ef25acc4c
+    Description: Same VPC as the app stacks (default VPC).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0849347d846fad5e5
+    Description: Same subnet as the app stacks (eu-west-2a).
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  GitRepoUrl:
+    Type: String
+    Default: https://github.com/Dakini/real-time-design.git
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  DevAppSecurityGroupId:
+    Type: String
+    Default: sg-05271d6ff589dbf24
+    Description: >-
+      linewarmer-dev's InstanceSecurityGroup (see that stack's
+      AppSecurityGroupId output). Leave empty to not grant it access.
+  ProdAppSecurityGroupId:
+    Type: String
+    Default: sg-04248ea7f58ce8948
+    Description: >-
+      linewarmer-prod's InstanceSecurityGroup (see that stack's
+      AppSecurityGroupId output). Leave empty to not grant it access.
+
+Conditions:
+  HasDevSecurityGroup: !Not [!Equals [!Ref DevAppSecurityGroupId, '']]
+  HasProdSecurityGroup: !Not [!Equals [!Ref ProdAppSecurityGroupId, '']]
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Observability stack - Grafana public, OTLP restricted to app instances
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Grafana (anonymous Viewer access, no auth stood up yet)
+
+  # OTLP ingress is granted per-source-security-group rather than folded into
+  # InstanceSecurityGroup's own ingress list, so each app stack can be
+  # created, updated, or torn down independently of this one.
+  OtlpGrpcFromDev:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDevSecurityGroup
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 4317
+      ToPort: 4317
+      SourceSecurityGroupId: !Ref DevAppSecurityGroupId
+      Description: OTLP gRPC from linewarmer-dev
+
+  OtlpHttpFromDev:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasDevSecurityGroup
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 4318
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref DevAppSecurityGroupId
+      Description: OTLP HTTP from linewarmer-dev
+
+  OtlpGrpcFromProd:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasProdSecurityGroup
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 4317
+      ToPort: 4317
+      SourceSecurityGroupId: !Ref ProdAppSecurityGroupId
+      Description: OTLP gRPC from linewarmer-prod
+
+  OtlpHttpFromProd:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasProdSecurityGroup
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: tcp
+      FromPort: 4318
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref ProdAppSecurityGroupId
+      Description: OTLP HTTP from linewarmer-prod
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ObservabilityInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: linewarmer-observability
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          echo "=== swap ==="
+          # t3.micro is 1 GB RAM for 5 containers (collector, Prometheus,
+          # Loki, Tempo, Grafana); without swap that OOMs under normal load.
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+          echo "=== packages ==="
+          dnf install -y docker git
+          systemctl enable --now docker
+
+          echo "=== docker cli plugins ==="
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          echo "=== source ==="
+          git clone ${GitRepoUrl} /opt/app
+          cd /opt/app
+
+          echo "=== pull and start ==="
+          # Every image here is public (Docker Hub), unlike ec2-stack.yaml's
+          # app image - no registry login needed.
+          docker compose -f observability/docker-compose.yaml up -d --pull always
+
+          echo "=== bootstrap complete ==="
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref ObservabilityInstance
+
+Outputs:
+  GrafanaUrl:
+    Description: Anonymous Viewer access, no auth in front of this yet.
+    Value: !Sub http://${ElasticIp}:3000
+  CollectorEndpoint:
+    Description: >-
+      Set as ObservabilityCollectorEndpoint on the linewarmer-dev and
+      linewarmer-prod stacks. Private IP - only reachable from inside the
+      VPC (see the OTLP security group rules above), not the internet.
+    Value: !Sub http://${ObservabilityInstance.PrivateIp}:4318
+  PrivateIp:
+    Value: !GetAtt ObservabilityInstance.PrivateIp
+  PublicIp:
+    Value: !Ref ElasticIp
+  SsmConnectCommand:
+    Description: >-
+      Use this to redeploy config changes by hand (git pull && docker compose
+      up -d --pull always) - no CI wiring for this stack, it changes rarely.
+    Value: !Sub aws ssm start-session --target ${ObservabilityInstance} --region ${AWS::Region}
+  BootstrapLog:
+    Value: /var/log/cloud-init-output.log

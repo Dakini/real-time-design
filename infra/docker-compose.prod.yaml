@@ -13,6 +13,10 @@ services:
       # stack and which build are actually running.
       ENVIRONMENT: ${ENVIRONMENT:-production}
       APP_VERSION: ${APP_VERSION:-unknown}
+      # Set by the deploy script/document from .env, which in turn is set at
+      # boot from ObservabilityCollectorEndpoint (infra/ec2-stack.yaml).
+      # Empty is fine - telemetry.py falls back to printing to container logs.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
   caddy:
     image: caddy:2-alpine

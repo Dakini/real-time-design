@@ -1,7 +1,8 @@
 # Linewarmer Infrastructure
 
-Three CloudFormation stacks in eu-west-2: `linewarmer-ecr` (shared image registry + CI push role)
-and two identical single-instance app stacks, `linewarmer-dev` and `linewarmer-prod`.
+Four CloudFormation stacks in eu-west-2: `linewarmer-ecr` (shared image registry + CI push role),
+two identical single-instance app stacks (`linewarmer-dev` and `linewarmer-prod`), and
+`linewarmer-observability` - one shared instance both app stacks send telemetry to.
 
 ## Diagram
 
@@ -36,16 +37,23 @@ flowchart TB
             EC2Prod["EC2 t3.small + EIP<br/>Caddy → app (FastAPI+SPA) → Postgres 16<br/>20 GB gp3, docker compose"]
             CFProd -- "HTTP :80 (prefix-list restricted)" --> EC2Prod
         end
+
+        subgraph ObsStack["linewarmer-observability stack"]
+            EC2Obs["EC2 t3.micro + EIP<br/>OTel Collector → Tempo/Loki/Prometheus → Grafana :3000<br/>20 GB gp3, docker compose"]
+        end
     end
 
     Users["Browsers (HTTPS + WebSockets)"] --> CFDev
     Users --> CFProd
+    Operator["Operator (browser)"] -- "HTTP :3000, anonymous Viewer" --> EC2Obs
 
     CI -- "assume via OIDC" --> PushRole --> ECR
     CI -- "assume via OIDC" --> DevRole -- "ssm:SendCommand" --> SSMDev --> EC2Dev
     Promote -- "assume via OIDC" --> ProdRole -- "ssm:SendCommand" --> SSMProd --> EC2Prod
     EC2Dev -- "pull image by SHA" --> ECR
     EC2Prod -- "pull image by SHA" --> ECR
+    EC2Dev -- "OTLP :4318 (SG-restricted)" --> EC2Obs
+    EC2Prod -- "OTLP :4318 (SG-restricted)" --> EC2Obs
     OIDC -.trusts.- PushRole & DevRole & ProdRole
 ```
 
@@ -74,6 +82,18 @@ password is generated at boot and lives only in `.env` on the instance.
 Single-instance is deliberate: realtime session state is in-process, so the stack
 intentionally avoids an ASG.
 
+**Observability** (`infra/observability-stack.yaml`)
+
+One t3.micro (1 GB RAM + 2 GB swap, 20 GB gp3) running the OTel Collector, Prometheus, Loki,
+Tempo, and Grafana via `observability/docker-compose.yaml` - the same stack used locally, just
+deployed once and shared. Both app instances export traces/metrics/logs to it over
+`OTEL_EXPORTER_OTLP_ENDPOINT` (set from `ObservabilityCollectorEndpoint` on `ec2-stack.yaml`,
+written to `.env` at boot); the security group only allows OTLP :4317/:4318 from the dev and prod
+app instances' own security groups, by ID. Grafana itself (:3000) is open to the internet with
+anonymous Viewer access, matching the local setup - there's no auth in front of it yet. Traces,
+metrics, and logs from both environments land in the same Grafana, distinguished by the
+`environment` resource attribute every signal already carries (`backend/app/telemetry.py`).
+
 ## Weak points and fixes (priority order)
 
 1. **No database durability.** Postgres data sits on the instance's root EBS volume
@@ -86,26 +106,35 @@ intentionally avoids an ASG.
    internet, but anyone's distribution can point at the Elastic IP's public DNS name.
    *Fix:* inject a secret custom origin header in the distribution and have Caddy reject
    requests without it.
-3. **No monitoring or alerting.** No CloudWatch alarms, no external check on `/healthz`.
+3. **Monitoring exists now, alerting doesn't.** Grafana has traces/metrics/logs from both
+   environments, but nothing pages anyone - no CloudWatch alarms, no external check on
+   `/healthz`, no Grafana alert rules on the existing dashboard.
    *Fix:* EC2 status-check alarm + Route 53 health check (or UptimeRobot) → SNS email; add a
-   disk-usage alarm (Docker layers and Postgres WAL fill 20 GB quietly).
-4. **Deploy blip, no rollback path.** `docker compose up -d` recreates the app container
+   disk-usage alarm (Docker layers and Postgres WAL fill 20 GB quietly); Grafana alert rules on
+   error-rate/latency panels.
+4. **Grafana is public and unauthenticated.** Anyone with the observability instance's IP can
+   read every trace, metric, and log from both dev and prod. Fine for now as a documented
+   trade-off (same as local), not fine indefinitely.
+   *Fix:* put it behind CloudFront + a Caddy/basic-auth layer like the app stacks, or switch to
+   SSM port-forwarding only (no public exposure at all).
+5. **Deploy blip, no rollback path.** `docker compose up -d` recreates the app container
    (seconds of 502s); rollback means manually invoking the SSM document with an old SHA.
    *Fix:* a `workflow_dispatch` "deploy this SHA to prod" workflow behind the same
    environment protection.
-5. **WebSocket idle timeout.** `OriginReadTimeout: 60` drops WebSockets silent for 60 s —
+6. **WebSocket idle timeout.** `OriginReadTimeout: 60` drops WebSockets silent for 60 s —
    verify the app pings well under that.
-6. **Smaller items.** Postgres password only on instance disk (Secrets Manager if needed);
+7. **Smaller items.** Postgres password only on instance disk (Secrets Manager if needed);
    CloudFront→origin is plain HTTP (documented trade-off); enable stack termination
    protection on prod.
 
-## Costs (~$46/month today)
+## Costs (~$59/month today)
 
 | Item | Monthly (eu-west-2) |
 |---|---|
-| 2 × t3.small on-demand | ~$34.50 |
-| 2 × public IPv4 | ~$7.30 |
-| 2 × 20 GB gp3 | ~$3.70 |
+| 2 × t3.small on-demand (app) | ~$34.50 |
+| 1 × t3.micro on-demand (observability) | ~$7.60 |
+| 3 × public IPv4 | ~$11.00 |
+| 3 × 20 GB gp3 | ~$5.55 |
 | ECR (~50 tagged images) + CloudFront | ~$1 (CloudFront 1 TB free tier) |
 
 Savings options, by effort-to-savings:
