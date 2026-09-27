@@ -25,6 +25,7 @@ from .db_models import (
 )
 from .errors import AppError, bad_request, conflict, forbidden, not_found, owner_only, session_not_found
 from .ids import new_id, secure_token
+from .metrics import canvas_elements_created, participants_active, rooms_created
 from .models import (
     CanvasElement,
     CanvasOp,
@@ -146,6 +147,7 @@ def create_session(db: Session, user: UserRow, title: str, prompt: str, schedule
         db.add(row)
         db.commit()
         db.refresh(row)
+    rooms_created.add(1)
     return InterviewSession.model_validate(row, from_attributes=True)
 
 
@@ -309,6 +311,7 @@ def join_with_token(db: Session, token: str, display_name: str) -> tuple[Intervi
         db.commit()
         db.refresh(session_row)
         db.refresh(participant_row)
+        participants_active.add(1)
 
         return (
             InterviewSession.model_validate(session_row, from_attributes=True),
@@ -348,6 +351,7 @@ def join_as_owner(db: Session, session_id: str, user: UserRow | None) -> tuple[I
         db.commit()
         db.refresh(session_row)
         db.refresh(participant_row)
+        participants_active.add(1)
         return (
             InterviewSession.model_validate(session_row, from_attributes=True),
             Participant.model_validate(participant_row, from_attributes=True),
@@ -363,6 +367,7 @@ def remove_participant(db: Session, session_id: str, user: UserRow | None, parti
         row.leftAt = now_iso()
         db.query(ParticipantTokenHashRow).filter_by(participantId=participant_id).delete()
         db.commit()
+        participants_active.add(-1)
 
 
 # --------------------------------------------------------------- canvas --
@@ -392,11 +397,22 @@ def commit_ops(db: Session, session_id: str, actor_id: str, items: list[tuple[st
         }
         cursor = session_row.cursor
         envelopes: list[CanvasOperationEnvelope] = []
+        element_ids = {el.id for el in elements}
+        elements_created = 0
 
         for client_op_id, op in items:
             if client_op_id in seen:
                 continue
             cursor += 1
+            # Tracks the id-space alongside `elements` so a create is only
+            # counted once even if the same batch later updates that id.
+            if op.type == "upsert" and op.element.id not in element_ids:
+                elements_created += 1
+                element_ids.add(op.element.id)
+            elif op.type == "delete":
+                element_ids.discard(op.id)
+            elif op.type == "clear":
+                element_ids.clear()
             env = CanvasOperationEnvelope(
                 id=new_id("op"),
                 clientOperationId=client_op_id,
@@ -424,6 +440,8 @@ def commit_ops(db: Session, session_id: str, actor_id: str, items: list[tuple[st
                 db.add(CanvasElementRow(sessionId=session_id, id=el.id, data=el.model_dump(mode="json")))
             session_row.cursor = cursor
         db.commit()
+    if elements_created:
+        canvas_elements_created.add(elements_created)
     return envelopes
 
 

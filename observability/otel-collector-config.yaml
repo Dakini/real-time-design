@@ -1,0 +1,53 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 200
+  batch: {}
+
+exporters:
+  # Tempo speaks OTLP natively, so traces go straight in.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Loki 3.x also accepts OTLP natively at /otlp/v1/logs; otlphttp appends
+  # that path itself from the "/otlp" base.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  # Prometheus can't be pushed to - it scrapes this exporter's endpoint
+  # instead (see prometheus.yml).
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  telemetry:
+    metrics:
+      # Defaults to localhost, which is unreachable from the separate
+      # Prometheus container; this is what prometheus.yml's
+      # otel-collector-internal job scrapes.
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

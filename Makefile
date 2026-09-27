@@ -3,7 +3,8 @@
         kill kill-backend kill-frontend \
         test test-backend test-integration e2e \
         postgres docker-build docker-run \
-        up down \
+        up down up-observed \
+        observability-up observability-down \
         clean
 
 BACKEND_PORT := 8091
@@ -138,6 +139,22 @@ up:
 
 down:
 	$(COMPOSE_ENV) docker compose down
+
+# Same as `up`, but also wires the app to send telemetry to the observability
+# stack (`make observability-up` first) instead of just printing it to
+# `docker compose logs app`. See infra/docker-compose.otel.yaml.
+up-observed:
+	$(COMPOSE_ENV) docker compose -f docker-compose.yaml -f infra/docker-compose.otel.yaml up --build -d
+	@echo "App on http://localhost:$(APP_PORT) — Grafana on http://localhost:3000"
+
+# Separate Compose project from the app stack above (own network/volumes) -
+# the app opts in by setting OTEL_EXPORTER_OTLP_ENDPOINT (see observability/README.md).
+observability-up:
+	docker compose -f observability/docker-compose.yaml up -d
+	@echo "Grafana on http://localhost:3000 — logs: docker compose -f observability/docker-compose.yaml logs -f"
+
+observability-down:
+	docker compose -f observability/docker-compose.yaml down
 
 clean:
 	find backend -type d -name '__pycache__' -not -path '*/.venv/*' -exec rm -rf {} +

@@ -8,6 +8,7 @@ from .. import service
 from ..database import get_db
 from ..db_models import InterviewerSessionTokenRow, ParticipantRow, ParticipantTokenHashRow, SessionRow
 from ..deps import SESSION_COOKIE
+from ..metrics import canvas_component_creation_failures
 from ..models import (
     ClientMessage,
     DocumentUpdateMessage,
@@ -101,6 +102,11 @@ async def connect_room(
             try:
                 message = _client_message_adapter.validate_python(data)
             except ValidationError:
+                # A malformed "ops" message is, from the client's perspective, a
+                # failed attempt to create/update a canvas component - count it
+                # even though we still drop it rather than crash the connection.
+                if isinstance(data, dict) and data.get("type") == "ops":
+                    canvas_component_creation_failures.add(1)
                 continue
 
             if message.type == "ops":

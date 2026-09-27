@@ -1,0 +1,17 @@
+services:
+  app:
+    environment:
+      # observability/ must already be up (`make observability-up`) - this
+      # only attaches to its network and points at the collector already
+      # running there, it doesn't start it.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      APP_VERSION: ${APP_VERSION:-dev}
+    networks:
+      - default
+      - observability
+
+networks:
+  observability:
+    name: observability_default
+    external: true
