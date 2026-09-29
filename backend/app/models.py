@@ -140,9 +140,18 @@ class BaseElementFields(BaseModel):
     updatedAt: int
 
 
+ComponentType = Literal[
+    "service", "rounded", "boundary", "generic",
+    "relational-db", "nosql-db", "cache", "object-store", "warehouse",
+    "queue", "stream", "pubsub",
+    "client", "browser-client", "api-gateway", "load-balancer", "cdn", "external-api",
+    "server", "worker", "function", "cluster",
+]
+
+
 class NodeElement(BaseElementFields):
     kind: Literal["node"] = "node"
-    componentType: str
+    componentType: ComponentType
     label: str
     description: str
     x: float
