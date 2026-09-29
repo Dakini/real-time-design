@@ -1,0 +1,8 @@
+[project]
+name = "on-call-engineer"
+version = "0.1.0"
+description = "Polls the Grafana alert API and hands firing alerts to a headless coding agent"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+]

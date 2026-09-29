@@ -51,7 +51,7 @@ groups:
           severity: critical
           service: linewarmer-backend
 
-      - uid: linewarmer-canvas-component-creation-failures
+      - uid: linewarmer-canvas-creation-failures
         title: "Linewarmer: repeated canvas component creation failures"
         # One alert instance per (deployment_environment, service_version) -
         # a client sending malformed "ops" messages usually means a broken

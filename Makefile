@@ -1,10 +1,11 @@
-.PHONY: install install-backend install-frontend install-e2e \
+.PHONY: install install-backend install-frontend install-e2e install-on-call \
         dev backend frontend \
         kill kill-backend kill-frontend \
         test test-backend test-integration e2e \
         postgres docker-build docker-run \
         up down up-observed \
         observability-up observability-down \
+        on-call \
         clean
 
 BACKEND_PORT := 8091
@@ -47,6 +48,9 @@ install-frontend:
 
 install-e2e:
 	cd e2e && npm i && npx playwright install --with-deps chromium
+
+install-on-call:
+	cd on-call-engineer && uv sync
 
 # Run backend (reload) and frontend dev server together; Ctrl+C stops both.
 dev:
@@ -155,6 +159,12 @@ observability-up:
 
 observability-down:
 	docker compose -f observability/docker-compose.yaml down
+
+# Polls the observability stack's alert API (make observability-up first) and
+# hands newly-firing alerts to a headless Claude Code agent for triage - see
+# on-call-engineer/README.md.
+on-call:
+	cd on-call-engineer && uv run python poll.py
 
 clean:
 	find backend -type d -name '__pycache__' -not -path '*/.venv/*' -exec rm -rf {} +
