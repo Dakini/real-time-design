@@ -103,10 +103,16 @@ groups:
         dashboardUId: linewarmer-app-metrics
         panelId: 4
         annotations:
+          # service/owner are written literally, not templated via $labels -
+          # annotation templates only see labels produced by the query
+          # (deployment_environment, service_version, from the "sum by"
+          # grouping below), not the static labels: block on this rule, so
+          # {{ $labels.service }}/{{ $labels.owner }} silently render as
+          # "[no value]" instead of erroring.
           summary: >-
-            {{ $labels.service }} ({{ $labels.deployment_environment }}, version
+            linewarmer-backend ({{ $labels.deployment_environment }}, version
             {{ $labels.service_version }}) has had more than 3 canvas component
-            creation failures in 5m, sustained for 5m - owner: {{ $labels.owner }}.
+            creation failures in 5m, sustained for 5m - owner: linewarmer-backend-team.
         labels:
           severity: warning
           service: linewarmer-backend
