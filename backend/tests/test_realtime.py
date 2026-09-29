@@ -63,6 +63,30 @@ def test_delete_prunes_attached_connectors(owner_client):
     assert "el_c3" not in ids
 
 
+def test_ai_category_component_types_are_accepted(owner_client):
+    with owner_client.websocket_connect("/api/v1/sessions/ses_ratelimiter/room?participantId=pt_owner") as ws:
+        ws.receive_json()  # room_joined
+        ws.receive_json()  # presence_update
+
+        el = {
+            "id": "el_llm",
+            "kind": "node",
+            "componentType": "llm",
+            "label": "LLM / Model",
+            "description": "inference",
+            "x": 0,
+            "y": 0,
+            "width": 176,
+            "height": 60,
+            "createdBy": "pt_owner",
+            "updatedAt": 1,
+        }
+        ws.send_json({"type": "ops", "ops": [{"clientOperationId": "cid-ai", "op": {"type": "upsert", "element": el}}]})
+        update = ws.receive_json()
+        assert update["type"] == "document_update"
+        assert len(update["ops"]) == 1
+
+
 def test_presence_update_is_sparse(owner_client):
     with owner_client.websocket_connect("/api/v1/sessions/ses_ratelimiter/room?participantId=pt_owner") as ws:
         ws.receive_json()

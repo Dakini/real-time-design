@@ -146,6 +146,7 @@ ComponentType = Literal[
     "queue", "stream", "pubsub",
     "client", "browser-client", "api-gateway", "load-balancer", "cdn", "external-api",
     "server", "worker", "function", "cluster",
+    "llm", "embedding", "vector-db", "agent",
 ]
 
 

@@ -9,17 +9,7 @@ import type {
   Role,
 } from "@/services/types";
 import { UndoStack, invert } from "@/canvas/document";
-import { categoryOf } from "@/canvas/palette";
 import type { RoomHandle } from "@/services/api";
-
-// AI-category components (llm, embedding, vector-db, agent) aren't in the
-// backend's componentType allowlist yet, so the server silently drops them.
-// Render locally only once we know the op won't be rejected, rather than
-// showing something that then has to un-render itself later.
-function isAcceptedByServer(op: CanvasOp): boolean {
-  if (op.type !== "upsert" || op.element.kind !== "node") return true;
-  return categoryOf(op.element.componentType) !== "AI";
-}
 
 export interface RoomApi {
   session: InterviewSession | null;
@@ -121,11 +111,8 @@ export function useRoom(
 
   const commit = useCallback((ops: CanvasOp[], recordUndo = true) => {
     if (!ops.length) return;
-    const renderableOps = ops.filter(isAcceptedByServer);
-    if (recordUndo && renderableOps.length) {
-      undoRef.current.push(invert(elementsRef.current, renderableOps));
-    }
-    setElements((prev) => renderableOps.reduce((acc, op) => applyLocal(acc, op), prev));
+    if (recordUndo) undoRef.current.push(invert(elementsRef.current, ops));
+    setElements((prev) => ops.reduce((acc, op) => applyLocal(acc, op), prev));
     handleRef.current?.sendOps(ops);
     forceRender((n) => n + 1);
   }, []);
