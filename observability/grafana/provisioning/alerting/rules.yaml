@@ -50,3 +50,69 @@ groups:
         labels:
           severity: critical
           service: linewarmer-backend
+
+      - uid: linewarmer-canvas-component-creation-failures
+        title: "Linewarmer: repeated canvas component creation failures"
+        # One alert instance per (deployment_environment, service_version) -
+        # a client sending malformed "ops" messages usually means a broken
+        # build, so version is worth splitting on as well as environment.
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # More than 3 failures in a rolling 5m window - a one-off
+              # dropped/malformed message isn't worth paging on, but a
+              # participant repeatedly failing to create canvas components
+              # is actively unable to use the product.
+              expr: sum by (deployment_environment, service_version) (increase(canvas_component_creation_failures_total[5m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [3]
+        noDataState: OK
+        execErrState: Alerting
+        # The >3-in-5m condition itself has to hold for a further 5m before
+        # firing, so this only pages for a genuinely sustained run of
+        # failures (~10m+), not a single burst.
+        for: 5m
+        # dashboardUId/panelId (rather than a hardcoded URL, which would go
+        # stale between dev/prod or across a domain change) so Grafana can
+        # attach a real "view dashboard"/"view panel" link, both in the UI
+        # and as {{ .DashboardURL }} / {{ .PanelURL }} in notifications -
+        # filled in from whatever root_url this Grafana instance actually
+        # runs behind (localhost in dev, the Caddy-fronted domain in prod;
+        # see infra/Caddyfile.observability).
+        dashboardUId: linewarmer-app-metrics
+        panelId: 4
+        annotations:
+          summary: >-
+            {{ $labels.service }} ({{ $labels.deployment_environment }}, version
+            {{ $labels.service_version }}) has had more than 3 canvas component
+            creation failures in 5m, sustained for 5m - owner: {{ $labels.owner }}.
+        labels:
+          severity: warning
+          service: linewarmer-backend
+          # No ownership/on-call system exists in this repo yet (no
+          # CODEOWNERS, no paging rotation) - this is a placeholder so the
+          # alert has *an* owner field to fill in rather than none. Update to
+          # whatever team/person actually owns the backend before wiring up
+          # a real contact point.
+          owner: linewarmer-backend-team

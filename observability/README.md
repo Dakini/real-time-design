@@ -25,9 +25,23 @@ the app runs fine without it.
 
 ## Alerting
 
-`grafana/provisioning/alerting/rules.yaml` provisions one alert, "Linewarmer:
-5xx error rate" (one instance per `deployment_environment`), firing when a
-5xx response rate stays above 0 req/s for 5 minutes. No contact point is
-provisioned alongside it - Grafana's default one needs SMTP credentials this
-repo doesn't have, so a firing alert is visible under Alerting but notifies
-no one until a real contact point (email, Slack webhook, etc.) is added.
+`grafana/provisioning/alerting/rules.yaml` provisions two alerts. No contact
+point is provisioned alongside them - Grafana's default one needs SMTP
+credentials this repo doesn't have, so a firing alert is visible under
+Alerting but notifies no one until a real contact point (email, Slack
+webhook, etc.) is added.
+
+- **"Linewarmer: 5xx error rate"** (one instance per `deployment_environment`)
+  fires when a 5xx response rate stays above 0 req/s for 5 minutes.
+- **"Linewarmer: repeated canvas component creation failures"** (one instance
+  per `deployment_environment` + `service_version`) fires when more than 3
+  canvas component creation failures happen in a rolling 5-minute window,
+  sustained for 5 minutes - a single dropped/malformed message isn't worth
+  paging on, but a participant repeatedly unable to create canvas components
+  is actively unable to use the product. Carries `service` and `owner`
+  labels and a `dashboardUId`/`panelId` (Linewarmer - Application Metrics,
+  "Canvas Component Creation Failures" panel) so notifications get a real
+  dashboard link instead of a hardcoded one. `owner` is currently a
+  placeholder (`linewarmer-backend-team`) - there's no CODEOWNERS or paging
+  rotation in this repo yet, so update it to whoever actually owns the
+  backend before wiring up a real contact point.
